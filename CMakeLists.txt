@@ -4,6 +4,7 @@ set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -g")
 set(CMAKE_CXX_FLAGS_RELEASE_INIT "-O3")
 
 project(CpliceAI C)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(include)
 

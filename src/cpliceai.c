@@ -68,12 +68,12 @@ typedef struct {
     int dl_idx;
 } Score;
 
-void reverse_str(char *s, int len) {
+void reverse_encoding(float *enc, int len) {
     char tmp;
     for (int i = 0, j = len - 1; i < j; i++, j--) {
-        tmp = s[i];
-        s[i] = s[j];
-        s[j] = tmp;
+        tmp = enc[i];
+        enc[i] = enc[j];
+        enc[j] = tmp;
     }
 }
 
@@ -142,7 +142,7 @@ int parse_transcripts(char *fp_path, int *num_out, Transcript *out[]) {
                     t.strand = *field;
                     break;
                 case 3:
-                    t.start = atoi(field)+1;
+                    t.start = atoi(field);
                     break;
                 case 4:
                     t.stop = atoi(field);
@@ -300,6 +300,7 @@ int one_hot_encode(const char *sequence, const int len, float *encoding_out[]) {
 
 int main() {
     int distance = 50;
+    char *output_vcf = "data/output.vcf";
 
     // Parse transcript and exon boundaries from SpliceAI annotation
     char *annotations = "data/grch37.txt";
@@ -316,8 +317,14 @@ int main() {
 
     // Open input vcf for reading
     char *vcf = "data/test.vcf";
-    htsFile *vcf_in = vcf_open(vcf, "r");
+    htsFile *vcf_in = bcf_open(vcf, "r");
     bcf_hdr_t *hdr = bcf_hdr_read(vcf_in);
+
+    htsFile *vcf_out =  bcf_open(output_vcf, "w");
+    const char *spliceai_tag = "SpliceAI";
+    const char *spliceai_desc = "##INFO=<ID=SpliceAI,Number=.,Type=String,Description=\"SpliceAIv1.3.1 variant annotation. These include delta scores (DS) and delta positions (DP) for acceptor gain (AG), acceptor loss (AL), donor gain (DG), and donor loss (DL). Format: ALLELE|SYMBOL|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL\">";
+    bcf_hdr_append(hdr, spliceai_desc);
+    bcf_hdr_write(vcf_out, hdr);
 
     bcf1_t *v = bcf_init();
 
@@ -332,9 +339,9 @@ int main() {
         if (!v) continue;
 
         // Find transcripts overlapping current variant
-        while (tidx < num_transcripts && (v->rid > bcf_hdr_name2id(hdr, transcripts[tidx].chr) || v->pos >= transcripts[tidx].stop)) tidx++;
+        while (tidx < num_transcripts && (v->rid > bcf_hdr_name2id(hdr, transcripts[tidx].chr) || v->pos > transcripts[tidx].stop)) tidx++;
 
-        // Look for transcripts overlapping the current position
+        // Count the number of overlapping transcripts
         num_overlaps = 0;
         while (
             tidx + num_overlaps < num_transcripts && 
@@ -343,11 +350,19 @@ int main() {
             v->pos <= transcripts[tidx + num_overlaps].stop
         ) num_overlaps++;
 
-        if (num_overlaps == 0) continue; // TODO: How should variants outside of transcripts be handled?
+        kstring_t info_str = {0};
+        if (num_overlaps == 0) {
+            kputc('.', &info_str);
+            bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
+            free(info_str.s);
+            bcf_write(vcf_out, hdr, v);
+            continue;
+        }
 
         int half_width = width / 2;
         int slen;
-        char *seq = faidx_fetch_seq(fa_in, transcripts[tidx].chr, v->pos - half_width - 1, v->pos + half_width, &slen);
+        char *seq = faidx_fetch_seq(fa_in, transcripts[tidx].chr, v->pos - half_width, v->pos + half_width, &slen);
+        seq[slen] = '\0';
 
         bcf_unpack(v, BCF_UN_ALL);
 
@@ -361,13 +376,13 @@ int main() {
             for (int j = 0; j < num_overlaps; j++) {
                 // Replace/pad bases beyond transcript boundary with N
                 int start_distance = half_width + (transcripts[tidx + j].start - v->pos);
-                int stop_distance = half_width - (transcripts[tidx + j].stop - v->pos);
+                int stop_distance = half_width - (transcripts[tidx + j].stop - v->pos) + 1;
 
                 int pad_start = start_distance > 0 ? start_distance : 0;
-                int pad_stop =  stop_distance > 0 ? stop_distance : 0;
+                int pad_stop = stop_distance > 0 ? stop_distance : 0;
 
                 // Create padded ref
-                char *padded_ref = malloc(width);
+                char *padded_ref = malloc(width + 1);
                 int c = 0;
                 for (; c < pad_start; c++) padded_ref[c] = 'N';
                 for (; c < width - pad_stop; c++) padded_ref[c] = seq[c];
@@ -377,36 +392,55 @@ int main() {
                 // Create padded alt
                 int alt_len = strlen(v->d.allele[i]);
                 int padded_alt_len = width - ref_len + alt_len;
-                char *padded_alt = malloc(padded_alt_len);
+                char *padded_alt = malloc(padded_alt_len + 1);
                 for (c = 0; c < half_width; c++) padded_alt[c] = padded_ref[c];
                 for (int ai = 0; ai < alt_len; ai++, c++) padded_alt[c] = v->d.allele[i][ai];
                 for (int ri = half_width + ref_len; ri < width; c++, ri++) padded_alt[c] = padded_ref[ri];
                 padded_alt[padded_alt_len] = '\0';
 
-                // if ('-' == transcripts[tidx + j].strand) { reverse_str(padded_ref, width); reverse_str(padded_alt, padded_alt_len); }
-
                 // Predict
                 float *ohe_ref;
                 one_hot_encode(padded_ref, width, &ohe_ref);
+
+                float *ohe_alt;
+                one_hot_encode(padded_alt, padded_alt_len, &ohe_alt);
+
+                // Reversing the encoding creates the complementary strand in opposite direction
+                if ('-' == transcripts[tidx + j].strand) { reverse_encoding(ohe_ref, width * ENCODING_SIZE); reverse_encoding(ohe_alt, padded_alt_len * ENCODING_SIZE); }
 
                 double *predictions_ref;
                 int num_predictions_ref;
                 predict(models, width * ENCODING_SIZE, ohe_ref, &num_predictions_ref, &predictions_ref);
 
-                float *ohe_alt;
-                one_hot_encode(padded_alt, padded_alt_len, &ohe_alt);
-
                 double *predictions_alt;
                 int num_predictions_alt;
                 predict(models, padded_alt_len * ENCODING_SIZE, ohe_alt, &num_predictions_alt, &predictions_alt);
 
-                printf("#ref_preds: %d, #alt_preds: %d\n", num_predictions_ref, num_predictions_alt);
-                if (ref_len != alt_len) continue;
-                // if (ref_len > alt_len) {
-                //     
-                // } else if (alt_len > ref_len) {
-                //     
-                // }
+                // printf("#ref_preds: %d, #alt_preds: %d\n", num_predictions_ref, num_predictions_alt);
+                // if (ref_len != alt_len) continue;
+                // Resizes the alt predictions to match the length of ref predictions
+                // WARN: This will break/cause logical bugs if neither ref_len nor alt_len are of size 1
+                if (ref_len > alt_len) {
+                    int del_len = ref_len - alt_len;
+                    predictions_alt = reallocarray(predictions_alt, sizeof(double), num_predictions_ref);
+                    for (int i = num_predictions_ref-1; i >= cov/2*3+ref_len*3; i--) predictions_alt[i] = predictions_alt[i-del_len*3];
+                    for (int i = cov/2*3+alt_len*3; i < cov/2*3+ref_len*3; i++) predictions_alt[i] = 0.0;
+                } else if (alt_len > ref_len) {
+                    int in_len = alt_len - ref_len;
+                    float *best_scores = calloc(3, sizeof(float));
+                    for (int i = cov/2*3; i < cov/2*3 + alt_len*3;) {
+                        for (int j = 0; j < 3; j++, i++) {
+                            if (predictions_alt[i] > best_scores[j]) best_scores[j] = predictions_alt[i];
+                        }
+                    }
+                    predictions_alt[cov/2*3] = best_scores[0];
+                    predictions_alt[cov/2*3+1] = best_scores[1];
+                    predictions_alt[cov/2*3+2] = best_scores[2];
+                    free(best_scores);
+
+                    for (int i = cov/2*3+ref_len*3; i < num_predictions_ref; i++) predictions_alt[i] = predictions_alt[i+in_len*3];
+                    predictions_alt = reallocarray(predictions_alt, sizeof(double), num_predictions_ref);
+                }
 
                 float ag_best = 0.0;
                 int ag_idx = 0;
@@ -423,18 +457,36 @@ int main() {
                     float dg = predictions_alt[p + DONOR_POS] - predictions_ref[p + DONOR_POS];
                     float dl = predictions_ref[p + DONOR_POS] - predictions_alt[p + DONOR_POS];
 
-                    if (ag > ag_best) { ag_best = ag; ag_idx = (p / 3)-1; }
-                    if (al > al_best) { al_best = al; al_idx = (p / 3)-1; }
-                    if (dg > dg_best) { dg_best = dg; dg_idx = (p / 3)-1; }
-                    if (dl > dl_best) { dl_best = dl; dl_idx = (p / 3)-1; }
+                    if (ag > ag_best) { ag_best = ag; ag_idx = (p / 3); }
+                    if (al > al_best) { al_best = al; al_idx = (p / 3); }
+                    if (dg > dg_best) { dg_best = dg; dg_idx = (p / 3); }
+                    if (dl > dl_best) { dl_best = dl; dl_idx = (p / 3); }
                 }
 
+                ag_idx = ag_idx-cov/2;
+                al_idx = al_idx-cov/2;
+                dg_idx = dg_idx-cov/2;
+                dl_idx = dl_idx-cov/2;
+                if ('-' == transcripts[tidx + j].strand) {
+                    ag_idx *= -1;
+                    al_idx *= -1;
+                    dg_idx *= -1;
+                    dl_idx *= -1;
+                }
+
+                if (info_str.l > 0) kputc(',', &info_str);
                 Score score = (Score) { v->d.allele[i], transcripts[tidx + j].name, ag_best, al_best, dg_best, dl_best, ag_idx, al_idx, dg_idx, dl_idx };
 
-                printf("%s|%s|%c|%f|%f|%f|%f|%d|%d|%d|%d\n", score.alt, score.gene, transcripts[tidx + j].strand, score.ag, score.al, score.dg, score.dl, score.ag_idx-cov/2, score.al_idx-cov/2, score.dg_idx-cov/2, score.dl_idx-cov/2);
-
+                char tmp[4096];  
+                sprintf(tmp, "%s|%s|%.2f|%.2f|%.2f|%.2f|%d|%d|%d|%d", score.alt, score.gene, score.ag, score.al, score.dg, score.dl, score.ag_idx, score.al_idx, score.dg_idx, score.dl_idx);
+                kputs(tmp, &info_str);
             }
         }
+
+        bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
+        free(info_str.s);
+        bcf_write(vcf_out, hdr, v);
+
         count++;
     }
     log_info("N of predictions: %d\n", count);
@@ -450,6 +502,8 @@ int main() {
     fai_destroy(fa_in);
     bcf_hdr_destroy(hdr);
     hts_close(vcf_in);
+
+    hts_close(vcf_out);
 
     // FILE *fasta = fopen("test.fasta", "r");
     // char input_sequence[1000000];
