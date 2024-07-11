@@ -9,6 +9,7 @@
 #include <htslib/hts.h>
 #include <htslib/vcf.h>
 #include <htslib/faidx.h>
+#include <htslib/tbx.h>
 
 #include "logging/log.h"
 
@@ -68,8 +69,31 @@ typedef struct {
     int dl_idx;
 } Score;
 
-void reverse_encoding(float *enc, int len) {
-    char tmp;
+int get_direction(char *s, int len) {
+    char *ss = strdup(s);
+    char *token = strtok(ss, "\t");
+    while (token != NULL) {
+        if (*token == '-') return -1;
+        if (*token == '+') return 1;
+
+        token = strtok(NULL, "\t");
+    }
+    return 0;
+}
+
+char *get_name(char *s, int len) {
+    char *ss = strdup(s);
+    char *token = strtok(ss, "\t");
+    for(int i = 0; token != NULL; i++) {
+        if (i == 3) return strdup(token);
+
+        token = strtok(NULL, "\t");
+    }
+    return "";
+}
+
+void reverse_encoding(float enc[], int len) {
+    float tmp;
     for (int i = 0, j = len - 1; i < j; i++, j--) {
         tmp = enc[i];
         enc[i] = enc[j];
@@ -77,6 +101,17 @@ void reverse_encoding(float *enc, int len) {
     }
 }
 
+void reverse_prediction(double preds[], int len, int size) {
+    int num_preds = len / size;
+    double tmp;
+    for (int i = 0; i < num_preds / 2; i++) {
+        for (int j = 0; j < size; j++) {
+            tmp = preds[i * size + j];
+            preds[i * size + j] = preds[(num_preds - 1 - i) * size + j];
+            preds[(num_preds - 1 - i) * size + j] = tmp;
+        }
+    }
+}
 
 int parse_exon_fields(char *s, int *num_out, int *out[]) {
     char *es = s;
@@ -303,10 +338,13 @@ int main() {
     char *output_vcf = "data/output.vcf";
 
     // Parse transcript and exon boundaries from SpliceAI annotation
-    char *annotations = "data/grch37.txt";
-    int num_transcripts;
-    Transcript *transcripts;
-    parse_transcripts(annotations, &num_transcripts, &transcripts);
+    // char *annotations = "data/grch37.txt";
+    // int num_transcripts;
+    // Transcript *transcripts;
+    // parse_transcripts(annotations, &num_transcripts, &transcripts);
+
+    htsFile *bed = hts_open("data/grch37.bed.gz", "r");
+    tbx_t *tbx = tbx_index_load("data/grch37.bed.gz");
 
     // Load SpliceAI models
     Model *models = load_models("models");
@@ -331,52 +369,55 @@ int main() {
     int cov = 2 * distance + 1;
     int width = CONTEXT_SIZE + cov;
 
-    int tidx = 0;
-    int num_overlaps = 0;
+    // int tidx = 0;
+    // int num_overlaps = 0;
     log_info("Starting predictions.");
     int count = 0;
+    hts_itr_t *itr;
     while (bcf_read(vcf_in, hdr, v) >= 0) {
         if (!v) continue;
 
         // Find transcripts overlapping current variant
-        while (tidx < num_transcripts && (v->rid > bcf_hdr_name2id(hdr, transcripts[tidx].chr) || v->pos > transcripts[tidx].stop)) tidx++;
-
-        // Count the number of overlapping transcripts
-        num_overlaps = 0;
-        while (
-            tidx + num_overlaps < num_transcripts && 
-            v->rid == bcf_hdr_name2id(hdr, transcripts[tidx + num_overlaps].chr) && 
-            v->pos >= transcripts[tidx + num_overlaps].start &&
-            v->pos <= transcripts[tidx + num_overlaps].stop
-        ) num_overlaps++;
+        // while (tidx < num_transcripts && (v->rid > bcf_hdr_name2id(hdr, transcripts[tidx].chr) || v->pos > transcripts[tidx].stop)) tidx++;
+        //
+        // // Count the number of overlapping transcripts
+        // num_overlaps = 0;
+        // while (
+        //     tidx + num_overlaps < num_transcripts && 
+        //     v->rid == bcf_hdr_name2id(hdr, transcripts[tidx + num_overlaps].chr) && 
+        //     v->pos >= transcripts[tidx + num_overlaps].start &&
+        //     v->pos <= transcripts[tidx + num_overlaps].stop
+        // ) num_overlaps++;
+        bcf_unpack(v, BCF_UN_ALL);
+        int ref_len = strlen(v->d.allele[0]);
+        itr = tbx_itr_queryi(tbx, v->rid, v->pos, v->pos+1);
 
         kstring_t info_str = {0};
-        if (num_overlaps == 0) {
-            kputc('.', &info_str);
-            bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
-            free(info_str.s);
-            bcf_write(vcf_out, hdr, v);
-            continue;
-        }
+        // if (num_overlaps == 0) {
+        //     kputc('.', &info_str);
+        //     bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
+        //     free(info_str.s);
+        //     bcf_write(vcf_out, hdr, v);
+        //     continue;
+        // }
 
         int half_width = width / 2;
         int slen;
-        char *seq = faidx_fetch_seq(fa_in, transcripts[tidx].chr, v->pos - half_width, v->pos + half_width, &slen);
+        char *seq = faidx_fetch_seq(fa_in, bcf_hdr_id2name(hdr, v->rid), v->pos - half_width, v->pos + half_width, &slen);
         seq[slen] = '\0';
 
-        bcf_unpack(v, BCF_UN_ALL);
-
-        int ref_len = strlen(v->d.allele[0]);
         for (int i = 1; i < v->n_allele; i++) {
             if ('.' == v->d.allele[i][0] || // Deletion
                 '*' == v->d.allele[i][0] || // Missing
                 '<' == v->d.allele[i][0] // <ID> string
             ) continue;
 
-            for (int j = 0; j < num_overlaps; j++) {
+
+            kstring_t str = {0};
+            while (tbx_itr_next(bed, tbx, itr, &str) >= 0) {
                 // Replace/pad bases beyond transcript boundary with N
-                int start_distance = half_width + (transcripts[tidx + j].start - v->pos);
-                int stop_distance = half_width - (transcripts[tidx + j].stop - v->pos) + 1;
+                int start_distance = half_width + (itr->curr_beg - v->pos);
+                int stop_distance = half_width - (itr->curr_end - (v->pos + 1));
 
                 int pad_start = start_distance > 0 ? start_distance : 0;
                 int pad_stop = stop_distance > 0 ? stop_distance : 0;
@@ -406,7 +447,8 @@ int main() {
                 one_hot_encode(padded_alt, padded_alt_len, &ohe_alt);
 
                 // Reversing the encoding creates the complementary strand in opposite direction
-                if ('-' == transcripts[tidx + j].strand) { reverse_encoding(ohe_ref, width * ENCODING_SIZE); reverse_encoding(ohe_alt, padded_alt_len * ENCODING_SIZE); }
+                int strand = get_direction(str.s, str.l);
+                if (strand == -1) { reverse_encoding(ohe_ref, width * ENCODING_SIZE); reverse_encoding(ohe_alt, padded_alt_len * ENCODING_SIZE); }
 
                 double *predictions_ref;
                 int num_predictions_ref;
@@ -416,8 +458,8 @@ int main() {
                 int num_predictions_alt;
                 predict(models, padded_alt_len * ENCODING_SIZE, ohe_alt, &num_predictions_alt, &predictions_alt);
 
-                // printf("#ref_preds: %d, #alt_preds: %d\n", num_predictions_ref, num_predictions_alt);
-                // if (ref_len != alt_len) continue;
+                if (strand == -1) { reverse_prediction(predictions_ref, num_predictions_ref, 3); reverse_prediction(predictions_alt, num_predictions_alt, 3); }
+
                 // Resizes the alt predictions to match the length of ref predictions
                 // WARN: This will break/cause logical bugs if neither ref_len nor alt_len are of size 1
                 if (ref_len > alt_len) {
@@ -467,20 +509,21 @@ int main() {
                 al_idx = al_idx-cov/2;
                 dg_idx = dg_idx-cov/2;
                 dl_idx = dl_idx-cov/2;
-                if ('-' == transcripts[tidx + j].strand) {
-                    ag_idx *= -1;
-                    al_idx *= -1;
-                    dg_idx *= -1;
-                    dl_idx *= -1;
-                }
+                // if (strand == -1) {
+                //     ag_idx *= -1;
+                //     al_idx *= -1;
+                //     dg_idx *= -1;
+                //     dl_idx *= -1;
+                // }
 
                 if (info_str.l > 0) kputc(',', &info_str);
-                Score score = (Score) { v->d.allele[i], transcripts[tidx + j].name, ag_best, al_best, dg_best, dl_best, ag_idx, al_idx, dg_idx, dl_idx };
+                Score score = (Score) { v->d.allele[i], get_name(str.s, str.l), ag_best, al_best, dg_best, dl_best, ag_idx, al_idx, dg_idx, dl_idx };
 
                 char tmp[4096];  
                 sprintf(tmp, "%s|%s|%.2f|%.2f|%.2f|%.2f|%d|%d|%d|%d", score.alt, score.gene, score.ag, score.al, score.dg, score.dl, score.ag_idx, score.al_idx, score.dg_idx, score.dl_idx);
                 kputs(tmp, &info_str);
             }
+            free(str.s);
         }
 
         bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
@@ -492,12 +535,12 @@ int main() {
     log_info("N of predictions: %d\n", count);
 
     bcf_destroy(v);
-    for (int i = 0; i < num_transcripts; i++) {
-        free(transcripts[i].name);
-        free(transcripts[i].chr);
-        free(transcripts[i].exons);
-    }
-    free(transcripts);
+    // for (int i = 0; i < num_transcripts; i++) {
+    //     free(transcripts[i].name);
+    //     free(transcripts[i].chr);
+    //     free(transcripts[i].exons);
+    // }
+    // free(transcripts);
 
     fai_destroy(fa_in);
     bcf_hdr_destroy(hdr);
