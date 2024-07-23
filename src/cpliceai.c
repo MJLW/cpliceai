@@ -6,63 +6,16 @@
 #include <klib/kvec.h>
 #include <klib/khash.h>
 
-#include <tensorflow/c/c_api.h>
 #include <htslib/hts.h>
 #include <htslib/vcf.h>
 #include <htslib/faidx.h>
 #include <htslib/tbx.h>
 #include <htslib/regidx.h>
-#include <tensorflow/c/tf_buffer.h>
-#include <tensorflow/c/tf_datatype.h>
-#include <tensorflow/c/tf_status.h>
-#include <tensorflow/c/tf_tensor.h>
 
 #include "logging/log.h"
+#include "predict.h"
+#include "utils.h"
 
-#define SPLICEAI_MODEL_PREFIX "spliceai"
-#define NUM_SPLICEAI_MODELS 5
-#define SPLICEAI_TAGS "serve"
-
-#define CONTEXT_SIZE 10000
-#define BOUNDARY_SIZE 5000
-
-#define ENCODING_SIZE 4
-#define BASE_A 'A'
-#define BASE_A_ENC 0
-#define BASE_C 'C'
-#define BASE_C_ENC 1
-#define BASE_G 'G'
-#define BASE_G_ENC 2
-#define BASE_T 'T'
-#define BASE_T_ENC 3
-
-#define NUM_SCORES 3
-#define ACCEPTOR_POS 1
-#define DONOR_POS 2
-
-#define SPLICEAI_TAG "SpliceAI"
-#define SPLICEAI_DESC "##INFO=<ID=SpliceAI,Number=.,Type=String,Description=\"SpliceAIv1.3.1 variant annotation. These include delta scores (DS) and delta positions (DP) for acceptor gain (AG), acceptor loss (AL), donor gain (DG), and donor loss (DL). Format: ALLELE|SYMBOL|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL\">"
-
-typedef struct {
-    TF_Status *status;
-    TF_Graph *graph;
-    TF_SessionOptions *sess_opts;
-    TF_Buffer *run_opts;
-    TF_Session *session;
-} Model;
-
-typedef struct {
-    char *alt;
-    char *gene;
-    float ag;
-    float al;
-    float dg;
-    float dl;
-    int ag_idx;
-    int al_idx;
-    int dg_idx;
-    int dl_idx;
-} Score;
 
 typedef struct {
     bcf1_t *v;
@@ -102,154 +55,6 @@ char *get_name(char *s, int len) {
     free(ss);
     return "";
 }
-
-void reverse_encoding(float enc[], int len) {
-    float tmp;
-    for (int i = 0, j = len - 1; i < j; i++, j--) {
-        tmp = enc[i];
-        enc[i] = enc[j];
-        enc[j] = tmp;
-    }
-}
-
-void reverse_prediction(float preds[], int len, int size) {
-    int num_preds = len / size;
-    float tmp;
-    for (int i = 0; i < num_preds / 2; i++) {
-        for (int j = 0; j < size; j++) {
-            tmp = preds[i * size + j];
-            preds[i * size + j] = preds[(num_preds - 1 - i) * size + j];
-            preds[(num_preds - 1 - i) * size + j] = tmp;
-        }
-    }
-}
-
-void deallocator(void* data, size_t a, void* b) {
-    // free(data);
-}
-
-// Check the status and print an error message if any
-int check_status(TF_Status* status, const char* msg) {
-    if (TF_GetCode(status) != TF_OK) {
-        fprintf(stderr, "Error: %s: %s\n", msg, TF_Message(status));
-        return 1;
-    }
-    return 0;
-}
-
-Model load_model(const char *path) {
-    TF_Status* status = TF_NewStatus();
-    TF_Graph* graph = TF_NewGraph();
-    TF_SessionOptions* sess_opts = TF_NewSessionOptions();
-    TF_Buffer* run_opts = NULL;
-
-    const char* tags = SPLICEAI_TAGS;
-    TF_Session* session = TF_LoadSessionFromSavedModel(sess_opts, run_opts, path, &tags, 1, graph, NULL, status);
-    check_status(status, "Loading model");
-
-    return (Model) { status, graph, sess_opts, run_opts, session };
-}
-
-Model *load_models(const char *models_dir) {
-    Model *models = malloc(NUM_SPLICEAI_MODELS * sizeof(Model));
-    for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
-        kstring_t model_path = {0};
-        kputs(models_dir, &model_path);
-        kputc('/', &model_path);
-        kputs(SPLICEAI_MODEL_PREFIX, &model_path);
-        kputl(i+1, &model_path);
-        models[i] = load_model(model_path.s);
-        free(model_path.s);
-    }
-    return models;
-}
-
-void destroy_models(Model *models) {
-    for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
-        TF_DeleteGraph(models[i].graph);
-        TF_DeleteSessionOptions(models[i].sess_opts);
-        TF_DeleteBuffer(models[i].run_opts);
-        TF_CloseSession(models[i].session, models[i].status);
-        TF_DeleteSession(models[i].session, models[i].status);
-        TF_DeleteStatus(models[i].status);
-    }
-    free(models);
-}
-
-int predict(Model *models, int data_size, int num_data, float **data, int *num_out, float *out[]) {
-    // Define the input dimensions
-    int64_t input_dims[] = {num_data, data_size / ENCODING_SIZE, 4};
-
-    float *input_data = malloc(num_data * data_size * sizeof(float));
-    for (int i = 0; i < num_data; i++) {
-        for (int j = 0; j < data_size; j++) {
-            input_data[i * data_size + j] = data[i][j];
-        }
-    }
-    // Create the input tensor
-    TF_Tensor *input_tensors[num_data];
-    for (int i = 0; i < 1; i++) {
-        input_tensors[i] = TF_NewTensor(TF_FLOAT, input_dims, 3, input_data, num_data * data_size * sizeof(float), &deallocator, 0);
-        if (!input_tensors[i]) {
-            fprintf(stderr, "Failed to create input tensor\n");
-            return 1;
-        }
-    }
-
-    int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE)* 3;
-    float *outputs = calloc(output_len, sizeof(float));
-
-    for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
-        Model model = models[i];
-        // Find input and output operations by name
-        TF_Operation* input_op = TF_GraphOperationByName(model.graph, "serving_default_input_1");
-        if (input_op == NULL) {
-            fprintf(stderr, "Failed to find input operation\n");
-            return 1;
-        }
-
-        TF_Operation* output_op = TF_GraphOperationByName(model.graph, "StatefulPartitionedCall");
-        if (output_op == NULL) {
-            fprintf(stderr, "Failed to find output operation\n");
-            return 1;
-        }
-
-        // Prepare the output tensor array
-        TF_Tensor* output_tensors[1];
-
-        // Prepare input/output operations and tensors
-        TF_Output input_opout = {input_op, 0};
-        TF_Output output_opout = {output_op, 0};
-
-        // Run the session
-        TF_SessionRun(model.session, model.run_opts,
-                      &input_opout, input_tensors, 1, // Input tensors and count
-                      &output_opout, output_tensors, 1, // Output tensors and count
-                      NULL, 0, // Target operations, target operations count
-                      NULL, // Run metadata
-                      model.status);
-        // check_status(model.status, "Running model");
-        if (TF_GetCode(model.status) != TF_OK) {
-            fprintf(stderr, "Error running the model: %s\n", TF_Message(model.status));
-            return 1;
-        }
-
-        // Process the output data
-        float* output_data = (float*)TF_TensorData(output_tensors[0]);
-        for (int k = 0; k < output_len; k++) outputs[k] += (float) output_data[k];
-
-        TF_DeleteTensor(output_tensors[0]);
-    }
-    TF_DeleteTensor(input_tensors[0]);
-    free(input_data);
-
-    for (int i = 0; i < output_len; i++) outputs[i] /= NUM_SPLICEAI_MODELS;
-
-    *num_out = output_len;
-    *out = outputs;
-
-    return 0;
-} 
 
 int open_annotations(const char *path, htsFile **bed, tbx_t **tbx) {
     *bed = hts_open(path, "r");
@@ -308,84 +113,17 @@ int prepare_output_vcf(const char *path, bcf_hdr_t *hdr, htsFile **out) {
     return 0;
 }
 
-reg_t find_transcript_boundary(const int position, const int start, const int end, const int width) {
-    int distance_from_start = width/2 + (start - position);
-    int distance_from_end = width/2 - (end - (position+1)); // End is open, so +1
-    return (reg_t) { distance_from_start > 0 ? distance_from_start : 0, distance_from_end > 0 ? distance_from_end : 0 };
-}
-
-char *pad_sequence(const char *seq, const reg_t boundary, const int width) {
-    char *padded_seq = malloc(width + 1);
-
-    int c = 0;
-    for (; c < boundary.start; c++) padded_seq[c] = 'N';
-    for (; c < width - boundary.end; c++) padded_seq[c] = seq[c];
-    for (; c < width; c++) padded_seq[c] = 'N';
-    padded_seq[width] = '\0';
-
-    return padded_seq;
-}
-
-char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen) {
-    int alt_seq_len = len - rlen + alen;
-    char *alt_seq = malloc(alt_seq_len + 1);
-
-    int c = 0;
-    for (; c < len/2; c++) alt_seq[c] = seq[c];
-    for (int ai = 0; ai < alen; ai++, c++) alt_seq[c] = alt[ai];
-    for (int ri = len/2 + rlen; ri < len; c++, ri++) alt_seq[c] = seq[ri];
-    alt_seq[alt_seq_len] = '\0';
-
-    return alt_seq;
-}
-
-int one_hot_encode(const char *sequence, const int len, float *encoding_out[]) {
-    int enc_len = len * ENCODING_SIZE;
-    float *encoding = calloc(enc_len, sizeof(float));
-    for (int i = 0; i < enc_len; i+=ENCODING_SIZE, sequence++) {
-        switch (*sequence) {
-            case BASE_A:
-                encoding[i + BASE_A_ENC] = 1.0f;
-                break;
-            case BASE_C:
-                encoding[i + BASE_C_ENC] = 1.0f;
-                break;
-            case BASE_G:
-                encoding[i + BASE_G_ENC] = 1.0f;
-                break;
-            case BASE_T:
-                encoding[i + BASE_T_ENC] = 1.0f;
-                break;
-        }
-    } 
-
-    *encoding_out = encoding;
-    return enc_len;
-}
-
-// int resize_alt_to_ref2(float **predictions_alt, int num_alts, int num_refs) {
-//     if (num_refs > num_alts) {
-//         int diff = num_refs - num_alts;
-//         *predictions_alt = realloc(*predictions_alt, num_refs * sizeof(float));
-//         for (int i = num_refs-1; i > num_alts; i--) (*predictions_alt)[i] = (*predictions_alt)[i-diff];
-//         for (int i = num_alts;
-//     }
-//
-//
-//     return -1;
-// }
-
 // NOTE: Requires refactor, it is too messy
 int resize_alt_to_ref(float **predictions_alt, int alt_len, int ref_len, int num_predictions_ref, int cov) {
 
-    if (ref_len > alt_len && alt_len == 1) {
+    if (ref_len > alt_len) {
         int del_len = ref_len - alt_len;
         *predictions_alt = realloc(*predictions_alt, sizeof(float) * num_predictions_ref);
         for (int i = num_predictions_ref-1; i >= cov/2*3+ref_len*3; i--) (*predictions_alt)[i] = (*predictions_alt)[i-del_len*3];
         for (int i = cov/2*3+alt_len*3; i < cov/2*3+ref_len*3; i++) (*predictions_alt)[i] = 0.0;
 
         return 0;
-    } else if (alt_len > ref_len && ref_len == 1) {
+    } else if (alt_len > ref_len) {
         int in_len = alt_len - ref_len;
         float *best_scores = calloc(3, sizeof(float));
         for (int i = cov/2*3; i < cov/2*3 + alt_len*3;) {
@@ -407,43 +145,29 @@ int resize_alt_to_ref(float **predictions_alt, int alt_len, int ref_len, int num
     return -1;
 }
 
-Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset) {
-    float ag_best = 0.0, al_best = 0.0, dg_best = 0.0, dl_best = 0.0;
-    int ag_idx = 0, al_idx = 0, dg_idx = 0, dl_idx = 0;
+void predict2(Model *models, char *seq, int seq_len, int strand, float *predictions[], int *num_predictions) {
+    float *ohe; one_hot_encode(seq, seq_len, &ohe);
 
-    for (int p = 0; p < len; p += NUM_SCORES) {
-        float ag = predictions_alt[p + ACCEPTOR_POS] - predictions_ref[p + ACCEPTOR_POS];
-        float al = predictions_ref[p + ACCEPTOR_POS] - predictions_alt[p + ACCEPTOR_POS];
-        float dg = predictions_alt[p + DONOR_POS] - predictions_ref[p + DONOR_POS];
-        float dl = predictions_ref[p + DONOR_POS] - predictions_alt[p + DONOR_POS];
+    if (strand == -1) reverse_encoding(ohe, seq_len * ENCODING_SIZE);
 
-        if (ag > ag_best) { ag_best = ag; ag_idx = (p / NUM_SCORES); }
-        if (al > al_best) { al_best = al; al_idx = (p / NUM_SCORES); }
-        if (dg > dg_best) { dg_best = dg; dg_idx = (p / NUM_SCORES); }
-        if (dl > dl_best) { dl_best = dl; dl_idx = (p / NUM_SCORES); }
-    }
+    predict(models, seq_len * ENCODING_SIZE, 1, &ohe, num_predictions, predictions);
+    free(ohe);
 
-    ag_idx = ag_idx-offset;
-    al_idx = al_idx-offset;
-    dg_idx = dg_idx-offset;
-    dl_idx = dl_idx-offset;
-
-    return (Score) { allele, gene_symbol, ag_best, al_best, dg_best, dl_best, ag_idx, al_idx, dg_idx, dl_idx };
+    if (strand == -1) reverse_prediction(*predictions, *num_predictions, 3);
 }
 
 int main(int argc, char *argv[]) {
     // Set tensorflow logging to WARN and above
     setenv("TF_CPP_MIN_LOG_LEVEL", "1", 1);
 
-    // Future CLI arguments
-    
+    // Parse CLI arguments
     if (argc != 7) { printf("Usage: ./cpliceai <distance> <models_dir> <ann.bed> <ref.fa> <in.vcf> <out.vcf> \n"); return -1; }
     // int distance = 50;
     // const char *annotations = "data/grch37.bed.gz";
     // const char *reference = "data/hs_ref_GRCh37.p5_all_contigs.fa";
     // const char *vcf = "data/test.vcf";
     // const char *output_vcf = "data/output.vcf";
-    int distance = atoi(argv[1]);
+    const int distance = atoi(argv[1]);
     const char *model_dir = argv[2];
     const char *annotations = argv[3];
     const char *reference = argv[4];
@@ -451,8 +175,6 @@ int main(int argc, char *argv[]) {
     const char *output_vcf = argv[6];
 
     // int batch_size = 700;
-
-    const char *spliceai_tag = SPLICEAI_TAG; // Info tag
 
     // Load SpliceAI models
     Model *models = load_models(model_dir);
@@ -471,9 +193,9 @@ int main(int argc, char *argv[]) {
     if (prepare_output_vcf(output_vcf, hdr, &vcf_out) < 0) return -1; // Prepare output vcf
 
     // Sequence size
-    int cov = 2 * distance + 1;
-    int width = CONTEXT_SIZE + cov;
-    int half_width = width / 2;
+    const int cov = 2 * distance + 1;
+    const int width = CONTEXT_SIZE + cov;
+    const int half_width = width / 2;
 
     bcf1_t *v = bcf_init();
     hts_itr_t *itr;
@@ -626,31 +348,18 @@ int main(int argc, char *argv[]) {
                 char *padded_alt = replace_variant(padded_ref, width, ref_len, v->d.allele[i], alt_len);
                 int padded_alt_len = width - ref_len + alt_len;
 
-                // Encode data for ref and alt
-                float *ohe_ref; one_hot_encode(padded_ref, width, &ohe_ref);
-                float *ohe_alt; one_hot_encode(padded_alt, padded_alt_len, &ohe_alt);
+                int strand = get_direction(str.s, str.l);
+
+                float *predictions_ref, *predictions_alt; int num_predictions_ref, num_predictions_alt;
+                predict2(models, padded_ref, width, strand, &predictions_ref, &num_predictions_ref);
+                predict2(models, padded_alt, padded_alt_len, strand, &predictions_alt, &num_predictions_alt);
                 free(padded_ref); free(padded_alt);
 
-                // Reversing the encoding creates the complementary strand in opposite direction
-                int strand = get_direction(str.s, str.l);
-                if (strand == -1) { reverse_encoding(ohe_ref, width * ENCODING_SIZE); reverse_encoding(ohe_alt, padded_alt_len * ENCODING_SIZE); }
-
-                // Predict
-                float *predictions_ref; int num_predictions_ref;
-                predict(models, width * ENCODING_SIZE, 1, &ohe_ref, &num_predictions_ref, &predictions_ref);
-                float *predictions_alt; int num_predictions_alt;
-                predict(models, padded_alt_len * ENCODING_SIZE, 1, &ohe_alt, &num_predictions_alt, &predictions_alt);
-                free(ohe_ref); free(ohe_alt);
-
-                // Reverse prediction order for negative strands
-                if (strand == -1) { reverse_prediction(predictions_ref, num_predictions_ref, 3); reverse_prediction(predictions_alt, num_predictions_alt, 3); }
-
                 if (info_str.l > 0) kputc(',', &info_str);
-
                 char *gene = get_name(str.s, str.l);
 
                 // Resizes the alt predictions to match the length of ref predictions
-                if ((ref_len != 1 || ref_len != 1) && resize_alt_to_ref(&predictions_alt, alt_len, ref_len, num_predictions_ref, cov) != 0) { 
+                if ((ref_len != 1 || alt_len != 1) && resize_alt_to_ref(&predictions_alt, alt_len, ref_len, num_predictions_ref, cov) != 0) { 
                     log_warn("Problem in vcf at pos %s:%d", bcf_hdr_id2name(hdr, v->rid), v->pos);
                     char tmp[4096];
                     sprintf(tmp, "%s|%s|.|.|.|.|.|.|.|.", v->d.allele[i], gene);
@@ -674,7 +383,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (info_str.l > 0) {
-            bcf_update_info_string(hdr, v, spliceai_tag, info_str.s);
+            bcf_update_info_string(hdr, v, SPLICEAI_TAG, info_str.s);
             free(info_str.s);
         }
 
@@ -687,8 +396,7 @@ int main(int argc, char *argv[]) {
 
     hts_close(bed); tbx_destroy(tbx);
     fai_destroy(fa_in);
-    hts_close(vcf_in);
-    hts_close(vcf_out);
+    hts_close(vcf_in); hts_close(vcf_out);
     bcf_hdr_destroy(hdr);
 
     destroy_models(models);

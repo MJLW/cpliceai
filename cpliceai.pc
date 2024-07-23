@@ -1,0 +1,11 @@
+prefix=/usr/local
+libdir=${prefix}/lib
+includedir=${prefix}/include/cpliceai
+
+Name: CpliceAI
+Version: 1.0
+Description: C implementation of SpliceAI
+Requires:
+Cflags: -I${includedir}
+Libs: -L${libdir} -lcpliceai
+Requires.private: htslib  tensorflow
