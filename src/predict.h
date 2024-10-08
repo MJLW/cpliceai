@@ -1,3 +1,6 @@
+#ifndef PREDICT_HEADER
+#define PREDICT_HEADER
+
 #include <tensorflow/c/c_api.h>
 #include <tensorflow/c/tf_buffer.h>
 #include <tensorflow/c/tf_datatype.h>
@@ -28,4 +31,6 @@ extern Model *load_models(const char *models_dir);
 extern void destroy_models(Model *models);
 
 extern int predict(Model *models, int data_size, int num_data, float **data, int *num_out, float *out[]);
+
+#endif
 

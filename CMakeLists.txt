@@ -32,12 +32,16 @@ target_link_libraries(cpliceai predict)
 add_library(utils STATIC src/utils.c)
 target_link_libraries(cpliceai utils)
 
+# Add range module
+add_library(range STATIC src/range.c)
+target_link_libraries(cpliceai range)
+
 # Link external libraries
 target_link_libraries(cpliceai ${TENSORFLOW_LIBRARIES})
 target_link_libraries(cpliceai ${HTSLIB_LIBRARIES})
 
 # Build SO
-add_library(libcpliceai SHARED src/predict.c src/utils.c)
+add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c)
 target_include_directories(libcpliceai PUBLIC src/)
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
 target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES})

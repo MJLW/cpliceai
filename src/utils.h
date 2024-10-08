@@ -1,8 +1,11 @@
+#ifndef UTILS_HEADER
+#define UTILS_HEADER
+
 #include <htslib/hts.h>
 #include <htslib/vcf.h>
 #include <htslib/tbx.h>
-#include <htslib/regidx.h>
 
+#include "range.h"
 
 #define ENCODING_SIZE 4
 #define BASE_A 'A'
@@ -35,18 +38,19 @@ typedef struct {
     int dl_idx;
 } Score;
 
+extern void reverse_encoding(float enc[], int len);
 
-void reverse_encoding(float enc[], int len);
+extern void reverse_prediction(float preds[], int len, int size);
 
-void reverse_prediction(float preds[], int len, int size);
+extern Range find_transcript_boundary(const int position, const int start, const int end, const int width);
 
-reg_t find_transcript_boundary(const int position, const int start, const int end, const int width);
+extern char *pad_sequence(const char *seq, const Range boundary, const int width);
 
-char *pad_sequence(const char *seq, const reg_t boundary, const int width);
+extern char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen);
 
-char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen);
+extern int one_hot_encode(const char *sequence, const int len, float *encoding_out[]);
 
-int one_hot_encode(const char *sequence, const int len, float *encoding_out[]);
+extern Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset);
 
-Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset);
+#endif
 

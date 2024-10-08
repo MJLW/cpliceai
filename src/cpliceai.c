@@ -340,7 +340,7 @@ int main(int argc, char *argv[]) {
             kstring_t str = {0};
             while (tbx_itr_next(bed, tbx, itr, &str) >= 0) {
                 // Replace/pad bases beyond transcript boundary with N
-                reg_t boundary = find_transcript_boundary(v->pos, itr->curr_beg, itr->curr_end, width);
+                Range boundary = find_transcript_boundary(v->pos, itr->curr_beg, itr->curr_end, width);
 
                 // Pad ref and alt using transcript boundary
                 int alt_len = strlen(v->d.allele[i]);

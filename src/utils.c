@@ -21,13 +21,13 @@ void reverse_prediction(float preds[], int len, int size) {
     }
 }
 
-reg_t find_transcript_boundary(const int position, const int start, const int end, const int width) {
+Range find_transcript_boundary(const int position, const int start, const int end, const int width) {
     int distance_from_start = width/2 + (start - position);
     int distance_from_end = width/2 - (end - (position+1)); // End is open, so +1
-    return (reg_t) { distance_from_start > 0 ? distance_from_start : 0, distance_from_end > 0 ? distance_from_end : 0 };
+    return (Range) { distance_from_start > 0 ? distance_from_start : 0, distance_from_end > 0 ? distance_from_end : 0 };
 }
 
-char *pad_sequence(const char *seq, const reg_t boundary, const int width) {
+char *pad_sequence(const char *seq, const Range boundary, const int width) {
     char *padded_seq = malloc(width + 1);
 
     int c = 0;
