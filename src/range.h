@@ -2,6 +2,7 @@
 #define RANGE_HEADER
 
 #include <inttypes.h>
+#include <stdint.h>
 
 typedef struct
 {
@@ -32,7 +33,7 @@ int intersect_ranges(Range r1, Range r2, Range *intersection);
 * @param r: Range to calculate the length of
 * @return length of the range
 */
-int range_len(Range r);
+int64_t range_len(Range r);
 
 /*
 * scale_range - Calculates a scaled range

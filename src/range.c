@@ -1,4 +1,5 @@
 #include "range.h"
+#include <stdlib.h>
 
 
 int ranges_overlap(Range r1, Range r2) {
@@ -31,8 +32,8 @@ int intersect_ranges(Range r1, Range r2, Range *intersection) {
     return 1;
 }
 
-int range_len(Range r) {
-    return r.end - r.start;
+int64_t range_len(Range r) {
+    return labs(r.end - r.start);
 }
 
 Range scale_range(Range r, int scale) {
