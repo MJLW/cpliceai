@@ -2,11 +2,17 @@
 
 
 int ranges_overlap(Range r1, Range r2) {
+    if (r1.start > r1.end) r1 = (Range) { r1.end, r1.start };
+    if (r2.start > r2.end) r2 = (Range) { r2.end, r2.start };
+
     return r1.start <= r2.end && r2.start <= r1.end;
 }
 
 int intersect_ranges(Range r1, Range r2, Range *intersection) {
     if (!ranges_overlap(r1, r2)) return 0;
+
+    if (r1.start > r1.end) r1 = (Range) { r1.end, r1.start };
+    if (r2.start > r2.end) r2 = (Range) { r2.end, r2.start };
 
     if (r1.start < r2.start) {
         if (r1.end > r2.end) {
