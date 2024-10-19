@@ -1,0 +1,154 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <tensorflow/c/c_api.h>
+#include <tensorflow/c/tf_buffer.h>
+#include <tensorflow/c/tf_status.h>
+#include <tensorflow/c/tf_tensor.h>
+
+#include "logging/log.h"
+
+typedef struct {
+    TF_Status *status;
+    TF_Graph *graph;
+    TF_SessionOptions *session_opts;
+    TF_Buffer *run_opts;
+    TF_Session *session;
+} Model;
+
+void one_hot_encode(const char* sequence, float* encoded_sequence, int context) {
+    int len = strlen(sequence);
+    int half = context / 2;
+    for (int i = 0; i < len + context; i++) {
+        char nucleotide = (i < half || i >= half + len) ? 'N' : sequence[i - half];
+        switch (nucleotide) {
+            case 'A': encoded_sequence[i * 4 + 0] = 1.0; break;
+            case 'C': encoded_sequence[i * 4 + 1] = 1.0; break;
+            case 'G': encoded_sequence[i * 4 + 2] = 1.0; break;
+            case 'T': encoded_sequence[i * 4 + 3] = 1.0; break;
+            default: break; // 'N' or any other character
+        }
+    }
+}
+
+void PrintStatus(TF_Status* status) {
+    if (TF_GetCode(status) != TF_OK) {
+        printf("ERROR: %s\n", TF_Message(status));
+    }
+}
+
+Model load_model(const char *model_dir) {
+    TF_Status* status = TF_NewStatus();
+    TF_Graph* graph = TF_NewGraph();
+    TF_SessionOptions* session_options = TF_NewSessionOptions();
+    TF_Buffer* run_options = NULL;
+    PrintStatus(status);
+
+    const char* tags[] = {"serve"};
+    int ntags = 1;
+
+    TF_Session* session = TF_LoadSessionFromSavedModel(session_options, run_options, model_dir, tags, ntags, graph, NULL, status);
+
+    PrintStatus(status);
+
+    return (Model) {status, graph, session_options, run_options, session};
+}
+
+
+// void deallocate(void *tensor, size_t len, void *arg) {
+//     if (tensor != NULL) {
+//         TF_DeleteTensor((TF_Tensor *)tensor);
+//     }
+// }
+
+
+
+int main(int argc, char *argv[]) {
+    // Your input sequence
+    const char* input_sequence = strdup("CGATCTGACGTGGGTGTCATCGCATTATCGATATTGCAT");
+    const int context = 10000;
+
+    // One-hot encode the input sequence
+    int input_len = strlen(input_sequence);
+    int total_len = input_len + context;
+    float* encoded_sequence = calloc(total_len * 4, sizeof(float));
+    one_hot_encode(input_sequence, encoded_sequence, context);
+
+    // Load models
+    Model models[5];
+    for (int i = 0; i < 5; i++) {
+        char model_dir[256];
+        sprintf(model_dir, "models/spliceai%d", i + 1);
+        models[i] = load_model(model_dir);
+    }
+
+    // // Predict using each model and average the results
+    float* predictions = (float*) malloc(total_len * 3 * sizeof(float)); // Assuming output is of shape (1, total_len, 3)
+    memset(predictions, 0, total_len * 3 * sizeof(float));
+    // Placeholder for input tensor and output tensor logic, assuming TensorFlow C API usage
+
+    log_info("Starting predictions.");
+    for (int m = 0; m < 5; m++) {
+        // Create input tensor
+        const int num_inputs = 1;
+        int64_t dims[4] = {num_inputs, 244, 244};
+        const size_t nbytes = 244 * 244 * sizeof(float);
+
+        TF_Tensor *t = TF_AllocateTensor(TF_FLOAT, dims, 3, nbytes);
+        memcpy(TF_TensorData(t), encoded_sequence, nbytes);
+
+        TF_Tensor *input_values[num_inputs];
+        for (int i = 0; i < num_inputs; i++) {
+            input_values[i] = t;
+        }
+        TF_Tensor *output_values = NULL;
+
+        TF_Output input_op = {TF_GraphOperationByName(models[m].graph, "serving_default_input_1"), 0};
+        TF_Output output_op = {TF_GraphOperationByName(models[m].graph, "StatefulPartitionedCall"), 0};
+
+        log_info("Starting prediction %d...", m);
+        TF_SessionRun(models[m].session, models[m].run_opts, &input_op, input_values, 1, &output_op,
+                &output_values, 1,
+                /* No target operations to run */
+                NULL, 0, NULL, models[m].status);
+        log_info("Finished prediction %d.", m);
+    }
+    log_info("Finished predictions.");
+
+    // Average the predictions
+    for (int i = 0; i < total_len * 3; i++) {
+        predictions[i] /= 5.0;
+    }
+
+    // Extract acceptor and donor probabilities
+    float* acceptor_prob = (float*) malloc(total_len * sizeof(float));
+    float* donor_prob = (float*) malloc(total_len * sizeof(float));
+
+    float total_acceptor_prob = 0;
+    float total_donor_prob = 0;
+    for (int i = 0; i < total_len; i++) {
+        acceptor_prob[i] = predictions[i * 3 + 1];
+        donor_prob[i] = predictions[i * 3 + 2];
+
+        total_acceptor_prob += acceptor_prob[i];
+        total_donor_prob += donor_prob[i];
+    }
+
+    // Print results or use them as needed
+    printf("Acceptor_prob: %f\nDonor_prob: %f\n", total_acceptor_prob, total_donor_prob);
+
+
+
+    // Cleanup
+    free(encoded_sequence);
+    free(predictions);
+    free(acceptor_prob);
+    free(donor_prob);
+    for (int i = 0; i < 5; i++) {
+        // TF_DeleteSession(sessions[i],);
+        // TF_DeleteGraph(models[i]);
+    }
+
+    return 0;
+}
