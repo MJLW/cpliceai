@@ -48,3 +48,15 @@ set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "
 target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES})
 target_link_libraries(libcpliceai PRIVATE ${HTSLIB_LIBRARIES})
 
+# Install library
+install(TARGETS libcpliceai
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        PUBLIC_HEADER DESTINATION include)
+
+# Include headers
+install(FILES
+    src/utils.h
+    src/predict.h
+    src/range.h
+    DESTINATION include/cpliceai)
