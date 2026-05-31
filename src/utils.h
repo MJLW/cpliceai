@@ -48,7 +48,7 @@ extern char *pad_sequence(const char *seq, const Range boundary, const int width
 
 extern char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen);
 
-extern int one_hot_encode(const char *sequence, const int len, float *encoding_out[]);
+extern int one_hot_encode(const char *sequence, const int len, float *encoding_out);
 
 extern Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset);
 

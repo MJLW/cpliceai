@@ -30,7 +30,7 @@ extern Model *load_models(const char *models_dir);
 
 extern void destroy_models(Model *models);
 
-extern int predict(Model *models, int data_size, int num_data, float **data, int *num_out, float *out[]);
+extern int predict(Model *models, int data_size, int num_data, float *data, int *num_out, float *out);
 
 #endif
 

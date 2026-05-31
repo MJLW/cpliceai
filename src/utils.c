@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "logging/log.h"
 
 void reverse_encoding(float enc[], int len) {
     float tmp;
@@ -52,9 +53,8 @@ char *replace_variant(const char *seq, const int len, const int rlen, const char
     return alt_seq;
 }
 
-int one_hot_encode(const char *sequence, const int len, float *encoding_out[]) {
+int one_hot_encode(const char *sequence, const int len, float *encoding) {
     int enc_len = len * ENCODING_SIZE;
-    float *encoding = calloc(enc_len, sizeof(float));
     for (int i = 0; i < enc_len; i+=ENCODING_SIZE, sequence++) {
         switch (*sequence) {
             case BASE_A:
@@ -70,9 +70,8 @@ int one_hot_encode(const char *sequence, const int len, float *encoding_out[]) {
                 encoding[i + BASE_T_ENC] = 1.0f;
                 break;
         }
-    } 
+    }
 
-    *encoding_out = encoding;
     return enc_len;
 }
 
