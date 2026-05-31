@@ -33,6 +33,7 @@ typedef struct {
     uint16_t n_chunks;
     uint32_t chunk_start;
     uint32_t name_start;
+    char strand;
 
     uint32_t size;
     uint16_t chunk_size;

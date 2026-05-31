@@ -100,16 +100,16 @@ int main(int argc, char *argv[]) {
     // Loop over all regions
     Gene gene = { 0 };
     int ret, slen;
-    int limit = 25, i = 0;
+    int limit = 25, counter = 0;
     char *current_region = NULL;
 
     while ((ret = read_gene_region(gene_regions_in, &gene)) == 0) {
-        // if (limit == ++i) {
-        //     break;
-        // }
+        if (limit == ++counter) {
+            break;
+        }
 
         if (current_region == NULL || strncmp(gene.chrom, current_region, GENE_CHROM_MAX) != 0) {
-            Contig contig = { .n_regions = 0, .region_start = ref.n_contigs * sizeof(Contig), .name_start = ref.region_names_len};
+            Contig contig = { .n_regions = 0, .region_start = ref.n_genes, .name_start = ref.contig_names_len};
             reference_add_contig(contig, gene.chrom, &ref);
 
             if (current_region != NULL) free(current_region);
@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
         }
 
         uint64_t size = gene.tx_end - gene.tx_start;
-        Region region = { .n_chunks = 0, .chunk_size = CHUNK_SIZE, .size = size, .chunk_start = ref.n_genes * sizeof(Region), .name_start = ref.region_names_len };
+        Region region = { .n_chunks = 0, .chunk_size = CHUNK_SIZE, .size = size, .strand = gene.strand, .chunk_start = ref.n_chunks, .name_start = ref.region_names_len };
         reference_add_region(region, gene.name, &ref);
 
         /*
@@ -140,16 +140,16 @@ int main(int argc, char *argv[]) {
 
         // log_info("Encoding.");
         float *encoding = malloc(padded_slen * ENCODING_SIZE * sizeof(float));
-        memset(encoding, 0, padded_slen * ENCODING_SIZE);
-        int encoding_len = one_hot_encode(padded_seq, padded_slen, (float *) encoding);
+        memset(encoding, 0, padded_slen * ENCODING_SIZE * sizeof(float));
+        int encoding_len = one_hot_encode(padded_seq, padded_slen, encoding);
         free(padded_seq);
 
         if (gene.strand == NEGATIVE_STRAND) reverse_encoding(encoding, encoding_len);
 
         // log_info("Predicting.");
         int num_gene_predictions;
-        float *gene_predictions = malloc(slen * NUM_SCORES * sizeof(float));
-        predict(models, encoding_len, 1, (float *) encoding, &num_gene_predictions, gene_predictions);
+        float *gene_predictions;
+        predict(models, encoding_len, 1, (float *) encoding, &num_gene_predictions, &gene_predictions);
         free(encoding);
 
         if (gene.strand == NEGATIVE_STRAND) reverse_prediction(gene_predictions, num_gene_predictions, NUM_SCORES);
@@ -158,7 +158,7 @@ int main(int argc, char *argv[]) {
 
         // Turn predictions into chunks and PositionScores
         for (uint64_t i = 0; i < size; i += CHUNK_SIZE) {
-            Chunk chunk = { .n_scores = 0, .scores_start = ref.n_chunks * sizeof(Chunk) };
+            Chunk chunk = { .n_scores = 0, .scores_start = ref.n_scores };
             reference_add_chunk(chunk, &ref);
 
             // Iterate over scores in chunk
@@ -178,7 +178,10 @@ int main(int argc, char *argv[]) {
 
     log_info("Writing out binarized reference to: %s", output_path);
     reference_write(output_path, &ref);
-    reference_free(&ref);
+
+    Reference test;
+    reference_read(output_path, &test);
+    // reference_free(&ref);
 
     fclose(gene_regions_in);
     fai_destroy(fa_in);

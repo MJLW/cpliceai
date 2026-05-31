@@ -78,7 +78,7 @@ void destroy_models(Model *models) {
     free(models);
 }
 
-int predict(Model *models, int data_size, int num_data, float *data, int *num_out, float *out) {
+int predict(Model *models, int data_size, int num_data, float *data, int *num_out, float *out[]) {
     // Define the input dimensions
     int64_t input_dims[] = {num_data, data_size / ENCODING_SIZE, 4};
 
@@ -88,9 +88,12 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
         return EXIT_FAILURE;
     }
 
-    int chunk_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
-    float *chunked_outputs[num_data];
-    for (int i = 0; i < num_data; i++) chunked_outputs[i] = out + i * chunk_len;
+    // int chunk_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
+    // float *chunked_outputs[num_data];
+    // for (int i = 0; i < num_data; i++) chunked_outputs[i] = out + i * chunk_len;
+
+    int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE)* 3;
+    float *outputs = calloc(output_len, sizeof(float));
 
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
         Model model = models[i];
@@ -129,17 +132,18 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
 
         // Process the output data
         const float* output_data = (float*)TF_TensorData(output_tensor);
-        for (int j = 0; j < num_data; j++) {
-            memmove(chunked_outputs[j], output_data, chunk_len);
+        for (int j = 0; j < output_len; j++) {
+            outputs[j] += (float) output_data[j];
         }
 
         TF_DeleteTensor(output_tensor);
     }
     TF_DeleteTensor(input_tensor);
 
-    for (int i = 0; i < num_data; i++) for (int j = 0; j < chunk_len; j++) chunked_outputs[i][j] /= NUM_SPLICEAI_MODELS;
+    for (int i = 0; i < output_len; i++) outputs[i] /= NUM_SPLICEAI_MODELS;
 
-    *num_out = chunk_len * num_data;
+    *num_out = output_len;
+    *out = outputs;
 
     return 0;
 }

@@ -29,7 +29,7 @@ int reference_alloc(
     size_t off_gene_starts = align_up(off_genes + m_genes * sizeof(Region), _Alignof(uint64_t));
     size_t off_gene_ends = align_up(off_gene_starts + m_genes * sizeof(uint64_t), _Alignof(uint64_t));
     size_t off_region_names = align_up(off_gene_ends + m_genes * sizeof(uint64_t), _Alignof(char));
-    size_t off_chunks = align_up(off_gene_ends + region_names_cap, _Alignof(Chunk));
+    size_t off_chunks = align_up(off_region_names + region_names_cap, _Alignof(Chunk));
     size_t off_scores = align_up(off_chunks + m_chunks * sizeof(Chunk), _Alignof(PositionScore));
     size_t total = off_scores + m_scores * sizeof(PositionScore);
 
@@ -69,11 +69,11 @@ int reference_resize(Reference *ref) {
     const char *old_block_ptr = ref->block;
     ref->block = realloc(ref->block, new_block_size);
     if (ref->block == NULL) {
-        // log_error("Failed to expand reference block.");
+        log_error("Failed to expand reference block.");
         return EXIT_FAILURE;
     }
 
-    // log_info("Resized successfully.");
+    log_info("Resized successfully.");
 
     ref->block_size = new_block_size;
     ref->m_scores += ref->m_scores;
@@ -87,8 +87,8 @@ int reference_resize(Reference *ref) {
     ref->contigs = (Contig *) ((char *) ref->contigs + ptr_offset);
     ref->contig_names = ref->contig_names + ptr_offset;
     ref->genes = (Region *) ((char *) ref->genes + ptr_offset);
-    ref->gene_starts = (uint64_t *) (ref->gene_starts + ptr_offset);
-    ref->gene_ends = (uint64_t *) (ref->gene_ends + ptr_offset);
+    ref->gene_starts = (uint64_t *) ((char *) ref->gene_starts + ptr_offset);
+    ref->gene_ends = (uint64_t *) ((char *) ref->gene_ends + ptr_offset);
     ref->region_names = ref->region_names + ptr_offset;
     ref->chunks = (Chunk *) ((char *) ref->chunks + ptr_offset);
     ref->scores = (PositionScore *) ((char *) ref->scores + ptr_offset);
@@ -101,26 +101,20 @@ void reference_add_score(const PositionScore score, Reference *ref) {
         reference_resize(ref);
     }
 
-    // log_info("Added score %i/%i", ref->n_scores, ref->m_scores);
     ref->scores[ref->n_scores++] = score;
-    ref->chunks[ref->n_chunks].n_scores++;
-    // (ref->chunks + ref->n_chunks)->n_scores++;
+    ref->chunks[ref->n_chunks-1].n_scores++;
 }
 
 void reference_add_chunk(const Chunk chunk, Reference *ref) {
-    // log_info("Added chunk %i/%i", ref->n_chunks, ref->m_chunks);
     ref->chunks[ref->n_chunks++] = chunk;
-    (ref->genes + ref->n_genes)->n_chunks++;
+    ref->genes[ref->n_genes-1].n_chunks++;
 }
 
 void reference_add_region(const Region region, const char *name, Reference *ref) {
-    // log_info("Added region %i/%i", ref->n_genes, ref->m_genes);
-
     ref->genes[ref->n_genes++] = region;
-    (ref->contigs + ref->n_contigs)->n_regions++;
+    ref->contigs[ref->n_contigs-1].n_regions++;
 
     size_t len = strlen(name) + 1;
-    // log_info("Added region name %s %i %i/%i", name, len, ref->region_names_len, ref->region_names_cap);
 
     memcpy(ref->region_names + ref->region_names_len, name, len);
     ref->region_names_len += len;
