@@ -100,14 +100,9 @@ int main(int argc, char *argv[]) {
     // Loop over all regions
     Gene gene = { 0 };
     int ret, slen;
-    int limit = 25, counter = 0;
     char *current_region = NULL;
 
     while ((ret = read_gene_region(gene_regions_in, &gene)) == 0) {
-        if (limit == ++counter) {
-            break;
-        }
-
         if (current_region == NULL || strncmp(gene.chrom, current_region, GENE_CHROM_MAX) != 0) {
             Contig contig = { .n_regions = 0, .region_start = ref.n_genes, .name_start = ref.contig_names_len};
             reference_add_contig(contig, gene.chrom, &ref);
