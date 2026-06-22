@@ -69,11 +69,8 @@ int reference_resize(Reference *ref) {
     const char *old_block_ptr = ref->block;
     ref->block = realloc(ref->block, new_block_size);
     if (ref->block == NULL) {
-        log_error("Failed to expand reference block.");
         return EXIT_FAILURE;
     }
-
-    log_info("Resized successfully.");
 
     ref->block_size = new_block_size;
     ref->m_scores += ref->m_scores;
@@ -110,12 +107,14 @@ void reference_add_chunk(const Chunk chunk, Reference *ref) {
     ref->genes[ref->n_genes-1].n_chunks++;
 }
 
-void reference_add_region(const Region region, const char *name, Reference *ref) {
-    ref->genes[ref->n_genes++] = region;
+void reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref) {
+    ref->genes[ref->n_genes] = region;
+    ref->gene_starts[ref->n_genes] = start;
+    ref->gene_ends[ref->n_genes] = end;
+    ref->n_genes++;
     ref->contigs[ref->n_contigs-1].n_regions++;
 
     size_t len = strlen(name) + 1;
-
     memcpy(ref->region_names + ref->region_names_len, name, len);
     ref->region_names_len += len;
 }
@@ -166,17 +165,17 @@ int reference_write(const char *path, const Reference *ref) {
         log_error("Failed to open: %s", path);
         return EXIT_FAILURE;
     }
-    if (ftruncate(fd, file_size) < 0) { 
+    if (ftruncate(fd, file_size) < 0) {
         log_error("Failed to truncate file.");
-        close(fd); 
-        return EXIT_FAILURE; 
+        close(fd);
+        return EXIT_FAILURE;
     }
 
     char *base = mmap(NULL, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (base == MAP_FAILED) {
         log_error("Failed to open MMAP sync to: %s", path);
-        return EXIT_FAILURE; 
+        return EXIT_FAILURE;
     }
 
     // Write header

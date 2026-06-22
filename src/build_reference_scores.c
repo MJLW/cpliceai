@@ -55,7 +55,7 @@ int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
         }
 
         n_regions++;
-        region_bytes += strnlen(gene.chrom, GENE_CHROM_MAX) + 1;
+        region_bytes += strnlen(gene.name, GENE_CHROM_MAX) + 1;
 
         region_size = gene.tx_end - gene.tx_start;
         n_chunks += (region_size / CHUNK_SIZE) + ((region_size % CHUNK_SIZE) > 0);
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]) {
     }
 
     const char *model_dir = args.model_dir;
-    const char *reference = args.fasta;
+    const char *fasta = args.fasta;
     const char *gene_regions = args.regions;
     const char *output_path = args.output;
 
@@ -95,14 +95,20 @@ int main(int argc, char *argv[]) {
 
     // Load reference fasta for sequence lookup
     faidx_t *fa_in;
-    if ((fa_in = fai_load(reference)) < 0) return EXIT_FAILURE; // Load reference fasta for sequence lookup
+    if ((fa_in = fai_load(fasta)) == NULL) {
+        log_error("Failed to read fasta: %s", fasta);
+        return EXIT_FAILURE; // Load reference fasta for sequence lookup
+    }
 
     // Loop over all regions
     Gene gene = { 0 };
     int ret, slen;
     char *current_region = NULL;
 
+    // int counter = 0;
+
     while ((ret = read_gene_region(gene_regions_in, &gene)) == 0) {
+        // if (counter++ >= 10) break;
         if (current_region == NULL || strncmp(gene.chrom, current_region, GENE_CHROM_MAX) != 0) {
             Contig contig = { .n_regions = 0, .region_start = ref.n_genes, .name_start = ref.contig_names_len};
             reference_add_contig(contig, gene.chrom, &ref);
@@ -113,7 +119,7 @@ int main(int argc, char *argv[]) {
 
         uint64_t size = gene.tx_end - gene.tx_start;
         Region region = { .n_chunks = 0, .chunk_size = CHUNK_SIZE, .size = size, .strand = gene.strand, .chunk_start = ref.n_chunks, .name_start = ref.region_names_len };
-        reference_add_region(region, gene.name, &ref);
+        reference_add_region(region, gene.name, gene.tx_start, gene.tx_end, &ref);
 
         /*
         * Run SpliceAI models over entire pre-mRNA
@@ -163,6 +169,7 @@ int main(int argc, char *argv[]) {
 
                 PositionScore score = { .pos = j, .acceptor = gene_predictions[prediction_index + ACCEPTOR_POS], .donor = gene_predictions[prediction_index + DONOR_POS] };
                 reference_add_score(score, &ref);
+                // printf("%i,%f,%f\n", score.pos, score.acceptor, score.donor);
             }
         }
 
@@ -176,7 +183,8 @@ int main(int argc, char *argv[]) {
 
     Reference test;
     reference_read(output_path, &test);
-    // reference_free(&ref);
+
+    reference_free(&ref);
 
     fclose(gene_regions_in);
     fai_destroy(fa_in);

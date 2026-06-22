@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "gene_regions.h"
-#include "klib/kvec.h"
 #include "logging/log.h"
 #include "predict.h"
 #include "reference.h"
@@ -16,6 +15,7 @@
 #define MAX_FIELD 256
 
 #define INITIAL_REF_SIZE_MALLOC 100000
+#define SCORE_THRESHOLD ZERO_EPSILON
 
 #define REQUIRED_ARGS \
     REQUIRED_STRING_ARG(variants, "variants", "TSV file containing SNV variants to predict for using SpliceAI") \
@@ -61,7 +61,7 @@ static int parse_line(const char *line, Variant *snv) {
         return EXIT_FAILURE;
     }
     char *end_pos;
-    snv->pos = strtoull(tok, &end_pos, 10);
+    snv->pos = strtoull(tok, &end_pos, 10) - 1;
     if (end_pos[0] != '\0') {
         log_error("Failed to parse %s into a positive integer.", tok);
         return EXIT_FAILURE;
@@ -76,7 +76,7 @@ static int parse_line(const char *line, Variant *snv) {
     snv->ref[MAX_FIELD-1] = '\0';
 
     tok = strtok(NULL, delim);
-    if (!tok || strnlen(tok, 2) > 1) {
+    if (!tok) {
         log_error("Failed to parse alternative base(s) from line: %s", line);
         return EXIT_FAILURE;
     }
@@ -148,6 +148,12 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    FILE *output = fopen(args.output, "w");
+    if (output == NULL) {
+        log_error("Could not open file: %s", args.output);
+        return EXIT_FAILURE;
+    }
+
     // Skip buffer
     char buffer[MAX_LINE];
     fgets(buffer, sizeof(buffer), variants_fp);
@@ -155,14 +161,15 @@ int main(int argc, char *argv[]) {
     // Loop over VCF variants
     Variant variant;
     char current_gene[MAX_FIELD] = { 0 };
-    char *current_gene_ref_seq = NULL;
+    char *current_gene_seq = NULL;
     uint64_t current_gene_start = 0, current_gene_end = 0;
     int current_gene_len = 0;
-    char current_gene_strand = 0;
+    char current_gene_strand = '+';
 
     size_t n_ref_scores = 0, m_ref_scores = INITIAL_REF_SIZE_MALLOC * NUM_SCORES;
     float *ref_scores = malloc(m_ref_scores * sizeof(float));
     while (read_next_snv_from_tsv(variants_fp, &variant) == EXIT_SUCCESS) {
+        fprintf(output, "#%s-%li-%s-%s\n", variant.chr, variant.pos+1, variant.ref, variant.alt);
 
         // If gene is different from previous variant, we need to load the reference scores for the current gene
         // TODO: Refactor this into a function
@@ -212,18 +219,18 @@ int main(int argc, char *argv[]) {
             current_gene_end = ref.gene_ends[gene_index];
             current_gene_strand = gene.strand;
             // -1 for 0-based
-            char *current_gene_seq = faidx_fetch_seq(fa_in, variant.chr, (int) current_gene_start-1, (int) current_gene_end-1, &current_gene_len); 
+            current_gene_seq = faidx_fetch_seq(fa_in, variant.chr, (int) current_gene_start, (int) current_gene_end, &current_gene_len); 
             current_gene_seq[current_gene_len] = '\0';
 
             // Allocate extra space current alloc'ed array for ref scores isn't big enough
-            if (m_ref_scores < gene.size) {
-                ref_scores = realloc(ref_scores, m_ref_scores * 2 * sizeof(float));
-                m_ref_scores *= 2;
+            n_ref_scores = gene.size * NUM_SCORES;
+            if (m_ref_scores < n_ref_scores) {
+                ref_scores = realloc(ref_scores, n_ref_scores * sizeof(float));
+                m_ref_scores = n_ref_scores;
             }
 
             // Initialize blanks for the reference scores, NEITHER=1, ACCEPTOR=0, DONOR=0
-            n_ref_scores = gene.size * NUM_SCORES;
-            memset(ref_scores, 0.0, n_ref_scores);
+            memset(ref_scores, 0, n_ref_scores * sizeof(float));
             for (int i = 0; i < n_ref_scores; i+=NUM_SCORES) {
                 ref_scores[i] = 1;
             }
@@ -250,7 +257,7 @@ int main(int argc, char *argv[]) {
         const int alt_len = strnlen(variant.alt, MAX_FIELD);
         // const int allele_dif = alt_len - ref_len;
 
-        const uint64_t pos_in_gene = variant.pos - current_gene_start - 1; // 0-based is nicer!
+        const uint64_t pos_in_gene = variant.pos - current_gene_start;
         const int alt_seq_len = current_gene_len + alt_len - ref_len;
         char *alt_seq = malloc(alt_seq_len + 1);
         alt_seq[alt_seq_len] = '\0';
@@ -258,7 +265,7 @@ int main(int argc, char *argv[]) {
         // Copy everything before variant
         memcpy(
             alt_seq,
-            current_gene_ref_seq,
+            current_gene_seq,
             pos_in_gene
         );
 
@@ -272,15 +279,15 @@ int main(int argc, char *argv[]) {
         // Copy everything after variant
         memcpy(
             alt_seq + pos_in_gene + alt_len,
-            current_gene_ref_seq + (pos_in_gene + ref_len),
+            current_gene_seq + (pos_in_gene + ref_len),
             current_gene_len - (pos_in_gene + ref_len)
         );
 
         // Add BOUNDAR_SIZE'd padding to the gene sequence, so that each position of the gene gets a prediction
-        int padded_slen = current_gene_len + CONTEXT_SIZE;
+        int padded_slen = alt_seq_len + CONTEXT_SIZE;
         char *padded_seq = malloc(padded_slen);
         memset(padded_seq, 'N', BOUNDARY_SIZE); // Prepend with 5000 Ns
-        memcpy(padded_seq + BOUNDARY_SIZE, alt_seq, current_gene_len);
+        memcpy(padded_seq + BOUNDARY_SIZE, alt_seq, alt_seq_len);
         memset(padded_seq + (padded_slen - BOUNDARY_SIZE), 'N', BOUNDARY_SIZE); // Append with 5000 Ns
         free(alt_seq);
 
@@ -293,20 +300,69 @@ int main(int argc, char *argv[]) {
 
         // log_info("Predicting.");
         int num_alt_predictions;
-        float *alt_predictions = malloc(current_gene_len * NUM_SCORES * sizeof(float));
-        predict(models, encoding_len, 1, (float *) encoding, &num_alt_predictions, alt_predictions);
+        float *alt_predictions;
+        predict(models, encoding_len, 1, (float *) encoding, &num_alt_predictions, &alt_predictions);
         free(encoding);
 
         if (current_gene_strand == NEGATIVE_STRAND) reverse_prediction(alt_predictions, num_alt_predictions, NUM_SCORES);
 
+        // Fix predictions order
+        if (alt_len != ref_len) {
+            if (alt_len > ref_len) { // Insertion
+                float max_donor = 0, max_acceptor = 0;
+                for (int i = 0; i < alt_len; i++) {
+                    int index = (pos_in_gene + i) * NUM_SCORES;
 
-        // TODO: Collapse/Expand Insertions/Deletions on alt predictions
+                    if (alt_predictions[index + DONOR_POS] > max_donor) {
+                        max_donor = alt_predictions[index + DONOR_POS];
+                    }
+                    if (alt_predictions[index + ACCEPTOR_POS] > max_acceptor) {
+                        max_acceptor = alt_predictions[index + ACCEPTOR_POS];
+                    }
+                }
 
-        // TODO: Convert to sparse representation, save only positions where ref or alt > 0.2
+                memmove(
+                    alt_predictions + ((pos_in_gene + ref_len) * NUM_SCORES),
+                    alt_predictions + ((pos_in_gene + alt_len) * NUM_SCORES),
+                    (current_gene_len - (pos_in_gene + ref_len)) * NUM_SCORES * sizeof(float)
+                );
+
+                alt_predictions[pos_in_gene * NUM_SCORES] = max_donor + max_donor > 1.0 ? 0 : 1 - max_donor - max_acceptor;
+                alt_predictions[pos_in_gene * NUM_SCORES + ACCEPTOR_POS] = max_acceptor;
+                alt_predictions[pos_in_gene * NUM_SCORES + DONOR_POS] = max_donor;
+            } else { // Deletion
+                alt_predictions = realloc(alt_predictions, current_gene_len * NUM_SCORES * sizeof(float));
+
+                memmove(
+                    alt_predictions + ((pos_in_gene + ref_len) * NUM_SCORES),
+                    alt_predictions + ((pos_in_gene + alt_len) * NUM_SCORES),
+                    (current_gene_len - (pos_in_gene + ref_len)) * NUM_SCORES * sizeof(float)
+                );
+
+                for (int i = (pos_in_gene + alt_len) * NUM_SCORES; i < (pos_in_gene + ref_len) * NUM_SCORES; i += NUM_SCORES) {
+                    alt_predictions[i] = 1.0;
+                    alt_predictions[i + ACCEPTOR_POS] = 0.0;
+                    alt_predictions[i + DONOR_POS] = 0.0;
+                }
+            }
+        }
+
+        for (int i = 0; i < current_gene_len; i++) {
+            const float ref_acceptor = ref_scores[i * NUM_SCORES + ACCEPTOR_POS];
+            const float ref_donor = ref_scores[i * NUM_SCORES + DONOR_POS];
+
+            const float alt_acceptor = alt_predictions[i * NUM_SCORES + ACCEPTOR_POS];
+            const float alt_donor = alt_predictions[i * NUM_SCORES + DONOR_POS];
+
+            if (ref_acceptor < SCORE_THRESHOLD && ref_donor < SCORE_THRESHOLD && alt_acceptor < SCORE_THRESHOLD && alt_donor < SCORE_THRESHOLD) continue;
+
+            fprintf(output, "%i,%f,%f,%f,%f\n", i, ref_acceptor, ref_donor, alt_acceptor, alt_donor);
+        }
 
         free(alt_predictions);
     }
 
+    if (current_gene_seq != NULL) free(current_gene_seq);
     free(ref_scores);
 
     destroy_models(models);

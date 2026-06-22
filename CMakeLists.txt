@@ -103,7 +103,7 @@ install(FILES
     DESTINATION include/cpliceai)
 
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(cpliceai_reference PRIVATE -Wall -fsanitize=address,leak,undefined -g)
-    target_link_options(cpliceai_reference PRIVATE -fsanitize=address,leak,undefined)
-endif()
+# if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+#     target_compile_options(cpliceai_reference PRIVATE -Wall -fsanitize=address,leak,undefined -g)
+#     target_link_options(cpliceai_reference PRIVATE -fsanitize=address,leak,undefined)
+# endif()

@@ -115,7 +115,7 @@ void reference_add_score(const PositionScore score, Reference *ref);
 
 void reference_add_chunk(const Chunk chunk, Reference *ref);
 
-void reference_add_region(const Region region, const char *name, Reference *ref);
+void reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref);
 
 void reference_add_contig(const Contig contig, const char *name, Reference *ref);
 
