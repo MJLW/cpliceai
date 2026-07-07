@@ -1,0 +1,329 @@
+#include <htslib/kstring.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <klib/kstring.h>
+#include <klib/kvec.h>
+#include <klib/khash.h>
+
+#include <htslib/hts.h>
+#include <htslib/vcf.h>
+#include <htslib/faidx.h>
+#include <htslib/tbx.h>
+#include <htslib/regidx.h>
+
+#include "../logging/log.h"
+#include "../predict.h"
+#include "../utils.h"
+#include "../reference.h"
+#include "../gene_reference.h"
+#include "../gene_regions.h"
+
+#define VEP_CSQ "CSQ"
+
+#define REQUIRED_ARGS \
+    REQUIRED_STRING_ARG(variants, "variants", "VCF file containing variants (split multiallelics) to predict for using SpliceAI") \
+    REQUIRED_STRING_ARG(model_dir, "model_dir", "Directory containing SpliceAI models") \
+    REQUIRED_STRING_ARG(fasta, "fasta", "Human reference fasta") \
+    REQUIRED_STRING_ARG(regions, "regions", "Gene region structure parsed from GFF with gff_to_bed.py") \
+    REQUIRED_STRING_ARG(output, "output", "Output VCF file with SpliceAI annotations")
+
+#define OPTIONAL_ARGS \
+    OPTIONAL_STRING_ARG(reference_bin, "\0", "--reference-scores", "", "") \
+    OPTIONAL_INT_ARG(window_size, 500, "--window-size", "window size", "Window size for the SpliceAI predictions") \
+    OPTIONAL_STRING_ARG(splice_output, "\0", "--splice-output", "file", "Output TSV with sparse splice predictions per variant")
+
+#define BOOLEAN_ARGS \
+    BOOLEAN_ARG(help, "-h", "Show help")
+
+#include <easyargs.h>
+
+KHASH_MAP_INIT_STR(GeneMap, Gene)
+
+typedef struct {
+    char *consequence;
+    char *gene;
+} ConsequenceAnnotation;
+
+typedef struct {
+    ConsequenceAnnotation *annotations;
+    kstring_t field;
+} Consequences;
+
+int open_input_vcf(const char *path, htsFile **vcf, bcf_hdr_t **hdr) {
+    *vcf = bcf_open(path, "r");
+    if (*vcf == NULL) {
+        log_error("Failed to open VCF file: %s", path);
+        return -1;
+    }
+
+    *hdr = bcf_hdr_read(*vcf);
+    if (*hdr == NULL) {
+        log_error("Failed to read header from VCF file: %s", path);
+        bcf_close(*vcf);
+        return -1;
+    }
+
+    return 0;
+}
+
+
+int prepare_output_vcf(const char *path, bcf_hdr_t *hdr, htsFile **out) {
+    *out = bcf_open(path, "w");
+    if (*out == NULL) {
+        log_error("Failed to open vcf output file: %s", path);
+        return -1;
+    }
+
+    if (bcf_hdr_append(hdr, SPLICEAI_DESC) != 0) {
+        log_error("Failed to append description for tag %s to vcf header.", SPLICEAI_TAG);
+        bcf_close(*out);
+        return -1;
+    }
+
+    if (bcf_hdr_write(*out, hdr) != 0) {
+        log_error("Failed to write to vcf file: %s", path);
+        bcf_close(*out);
+        return -1;
+    }
+
+    return 0;
+}
+
+void stranded_predict(Model *models, char *seq, int seq_len, char strand, float *predictions[], int *num_predictions) {
+    float *ohe;
+    ohe = malloc(seq_len * ENCODING_SIZE * sizeof(float));
+    one_hot_encode(seq, seq_len, ohe);
+
+    if (strand == '-') reverse_encoding(ohe, seq_len * ENCODING_SIZE);
+
+    predict(models, seq_len * ENCODING_SIZE, 1, ohe, num_predictions, predictions);
+    free(ohe);
+
+    if (strand == '-') reverse_prediction(*predictions, *num_predictions, 3);
+}
+
+// int GeneMap_read(const char *path, kh_GeneMap_t **gene_regions) {
+//     FILE *fp = fopen(path, "r");
+//     if (fp == NULL) {
+//         log_error("Could not open file: %s", path);
+//         return EXIT_FAILURE;
+//     }
+//
+//     kh_GeneMap_t *map = kh_init_GeneMap();
+//
+//     int ret;
+//     khiter_t key;
+//     Gene gene;
+//     while (read_gene_region(fp, &gene) == 0) {
+//         key = kh_put_GeneMap(map, gene.name, &ret);
+//         if (ret < 0) {
+//             log_error("Failed to insert new gene region, you may be running out of memory.");
+//             return EXIT_FAILURE;
+//         }
+//
+//         kh_value(map, key) = gene;
+//     }
+//
+//     *gene_regions = map;
+//
+//     return EXIT_SUCCESS;
+// }
+//
+// int GeneMap_get_gene(const char *gene_name, const kh_GeneMap_t *map, Gene *gene) {
+//     khiter_t key = kh_get_GeneMap(map, gene_name);
+//     if (key == kh_end(map)) {
+//         log_error("Failed to find gene region `%s`, are you using the correct gene_regions file?", gene_name);
+//         return EXIT_FAILURE;
+//     }
+//
+//     *gene = kh_value(map, key);
+//
+//     return EXIT_FAILURE;
+// }
+
+int Gene_build_regidx(const char *path, regidx_t **idx) {
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        log_error("Could not open file: %s", path);
+        return EXIT_FAILURE;
+    }
+
+    regidx_t *gene_index = regidx_init(NULL, NULL, NULL, sizeof(Gene), NULL);
+
+    Gene gene;
+    while (read_gene_region(fp, &gene) == 0) {
+        hts_pos_t beg = gene.tx_start, end = gene.tx_end;
+        char *chr = gene.chrom, *chr_end = chr + strlen(chr) + 1;
+        regidx_push(gene_index, chr, chr_end, beg, end, &gene);
+    }
+
+    *idx = gene_index;
+
+    return EXIT_SUCCESS;
+}
+
+int main(int argc, char *argv[]) {
+    // Set tensorflow logging to WARN and above
+    setenv("TF_CPP_MIN_LOG_LEVEL", "1", 1);
+
+    args_t args = make_default_args();
+    if (!parse_args(argc, argv, &args) || args.help) {
+        print_help(argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const char *variants = args.variants;
+    const char *reference_bin = args.reference_bin;
+    const char *model_dir = args.model_dir;
+    const char *fasta = args.fasta;
+    const char *gene_regions = args.regions;
+    const char *annotated_variants = args.output;
+
+    const int distance = args.window_size;
+    const char *prediction_output = args.splice_output;
+    const bool produce_splice_output = strncmp(prediction_output, "\0", 1) == 0;
+
+    // Load SpliceAI models
+    Model *models = load_models(model_dir);
+
+    Reference ref;
+    Reference_read(reference_bin, &ref);
+
+    faidx_t *fa_in;
+    if ((fa_in = fai_load(fasta)) < 0) return -1; // Load reference fasta for sequence lookup
+
+    htsFile *vcf_in; bcf_hdr_t *hdr;
+    if (open_input_vcf(variants, &vcf_in, &hdr) < 0) return -1; // Load input vcf
+
+
+    regidx_t *gene_index = NULL;
+    Gene_build_regidx(gene_regions, &gene_index);
+    if (gene_index == NULL) {
+        return EXIT_FAILURE;
+    }
+
+    htsFile *vcf_out;
+    if (prepare_output_vcf(annotated_variants, hdr, &vcf_out) < 0) return -1; // Prepare output vcf
+
+    // Sequence size
+    const int cov = 2 * distance + 1;
+    const int width = CONTEXT_SIZE + cov;
+    const int half_width = width / 2;
+
+    // Loop initialisations
+    regitr_t *itr = regitr_init(gene_index);
+    bcf1_t *v = bcf_init();
+    GeneReference gene_reference;
+    GeneReference_init(&gene_reference);
+    while (bcf_read(vcf_in, hdr, v) >= 0) {
+        if (!v) continue; // TODO: Can this even happen given bcf_init? Also, need to handle the non critical reading errors.
+
+        bcf_unpack(v, BCF_UN_STR);
+        int ref_len = strlen(v->d.allele[0]);
+        // INFO: Could skip here if ref_len > distance, but this logic is kept with alt_len > distance for consistency in output
+
+        if (!regidx_overlap(gene_index, bcf_hdr_id2name(hdr, v->rid), v->pos, v->pos+1, itr)) {
+            if (bcf_write(vcf_out, hdr, v) != EXIT_SUCCESS) log_error("Writing failed for file: %s", annotated_variants);
+            continue;
+        }
+
+        kstring_t info_str = {0};
+        for (int i = 1; i < v->n_allele; i++) {
+            if ('.' == v->d.allele[i][0] || // Deletion
+                '*' == v->d.allele[i][0] || // Missing
+                '<' == v->d.allele[i][0] // <ID> string
+            ) {
+                log_warn("Unsupported alternate allele found: %s. Skipping prediction(s) for %s:%li", v->d.allele[i], bcf_hdr_id2name(hdr, v->rid), v->pos+1);
+                if (info_str.l > 0) kputc(',', &info_str);
+                kputc('.', &info_str);
+                continue;
+            }
+
+            while(regitr_overlap(itr)) {
+                if (info_str.l > 0) kputc(',', &info_str);
+
+                Gene gene = regitr_payload(itr, Gene);
+                int alt_len = strlen(v->d.allele[1]);
+
+                if (ref_len > distance || alt_len > distance) {
+                    log_warn("Oversized indel found. Skipping prediction for at %s:%d:%s", bcf_hdr_id2name(hdr, v->rid), v->pos, gene.name);
+                    kputc('.', &info_str);
+                    continue;
+                }
+
+                if (gene.name != gene_reference.name && GeneReference_update(gene.chrom, gene.name, fa_in, &ref, &gene_reference) == EXIT_FAILURE) {
+                    log_warn("Failed to find reference for gene %s. Skipping prediction for %s:%li:%s...", gene.name, bcf_hdr_id2name(hdr, v->rid), v->pos + 1, gene.name);
+                    kputc('.', &info_str);
+                    continue;
+                }
+
+                int num_ref_predictions = cov * NUM_SCORES;
+                float *ref_predictions;
+                if (GeneReference_get_score_window(v->pos, distance, gene_reference, &ref_predictions) == EXIT_FAILURE) {
+                    // Memory issue, already logged by function
+                    return EXIT_FAILURE;
+                }
+
+                // Predict alt
+                int num_alt_predictions;
+                float *alt_predictions;
+
+                hts_pos_t gene_pos = v->pos - gene.tx_start;
+                hts_pos_t start = gene_pos - (CONTEXT_SIZE + distance);
+                hts_pos_t start_offset = 0;
+                if (start < 0) {
+                    start_offset = -start;
+                    start = 0;
+                }
+
+                hts_pos_t gene_length = gene.tx_end - gene.tx_start;
+                hts_pos_t end = gene_pos + (CONTEXT_SIZE + distance + 1) + 1;
+                if (end > gene_length) {
+                    end = gene_length;
+                }
+
+                char padded_seq[width];
+                memset(padded_seq, 'N', width);
+                memcpy(padded_seq + start_offset, gene_reference.seq.s + start, end - start);
+
+                stranded_predict(models, padded_seq, width + 1, gene_reference.strand, &alt_predictions, &num_alt_predictions);
+
+                // Align
+                align_predictions_alt_to_ref(distance, cov, ref_len, alt_len, alt_predictions);
+
+                // Form scores
+                Score score = calculate_delta_scores(v->d.allele[i], gene.name, ref_predictions, alt_predictions, num_ref_predictions, distance);
+                free(ref_predictions);
+                free(alt_predictions);
+
+                // TODO: Change this to kput functions, currently we hard limit the distance to less than 4096 if we do it this way
+                char tmp[4096];
+                sprintf(tmp, "%s|%s|%.2f|%.2f|%.2f|%.2f|%d|%d|%d|%d", score.alt, score.gene, score.ag, score.al, score.dg, score.dl, score.ag_idx, score.al_idx, score.dg_idx, score.dl_idx);
+                kputs(tmp, &info_str);
+            }
+        }
+
+        if (info_str.l > 0) {
+            bcf_update_info_string(hdr, v, SPLICEAI_TAG, info_str.s);
+            free(info_str.s);
+        }
+
+        if (bcf_write(vcf_out, hdr, v) != EXIT_SUCCESS) {
+            log_error("Writing failed for file: %s", annotated_variants);
+        }
+
+    }
+
+    bcf_destroy(v);
+    regitr_destroy(itr);
+    fai_destroy(fa_in);
+    hts_close(vcf_in); hts_close(vcf_out);
+    bcf_hdr_destroy(hdr);
+
+    destroy_models(models);
+
+    return 0;
+}
+

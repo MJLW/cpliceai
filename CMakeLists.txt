@@ -22,72 +22,76 @@ pkg_check_modules(TENSORFLOW REQUIRED tensorflow)
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
 # Create executable
-add_executable(cpliceai src/cpliceai.c)
-add_executable(cpliceai_reference src/build_reference_scores.c)
-add_executable(cpliceai_predict src/predict_splice.c)
-add_sanitizers(cpliceai_reference)
+add_executable(cpliceai_reference src/bin/build_reference_scores.c)
+add_executable(cpliceai_predict_variant src/bin/predict_variant.c)
+add_executable(cpliceai_predict_gene src/bin/predict_gene.c)
+# add_sanitizers(cpliceai_reference)
 
 # Add logging module
 add_library(logging STATIC src/logging/log.c)
 
-target_include_directories(cpliceai PRIVATE src/logging)
-target_link_libraries(cpliceai logging)
-
 target_include_directories(cpliceai_reference PRIVATE src/logging)
 target_link_libraries(cpliceai_reference logging)
 
-target_include_directories(cpliceai_predict PRIVATE src/logging)
-target_link_libraries(cpliceai_predict logging)
+target_include_directories(cpliceai_predict_variant PRIVATE src/logging)
+target_link_libraries(cpliceai_predict_variant logging)
+
+target_include_directories(cpliceai_predict_gene PRIVATE src/logging)
+target_link_libraries(cpliceai_predict_gene logging)
 
 
 # Add predict module
 add_library(predict STATIC src/predict.c)
-target_link_libraries(cpliceai predict)
 target_link_libraries(cpliceai_reference predict)
-target_link_libraries(cpliceai_predict predict)
+target_link_libraries(cpliceai_predict_variant predict)
+target_link_libraries(cpliceai_predict_gene predict)
 
 # Add utils module
 add_library(utils STATIC src/utils.c)
-target_link_libraries(cpliceai utils)
 target_link_libraries(cpliceai_reference utils)
-target_link_libraries(cpliceai_predict utils)
+target_link_libraries(cpliceai_predict_variant utils)
+target_link_libraries(cpliceai_predict_gene utils)
 
 # Add range module
 add_library(range STATIC src/range.c)
-target_link_libraries(cpliceai range)
 target_link_libraries(cpliceai_reference range)
-target_link_libraries(cpliceai_predict range)
+target_link_libraries(cpliceai_predict_variant range)
+target_link_libraries(cpliceai_predict_gene range)
 
 # Add gene region module
 add_library(gene_regions STATIC src/gene_regions.c)
 target_link_libraries(cpliceai_reference gene_regions)
-target_link_libraries(cpliceai_predict gene_regions)
+target_link_libraries(cpliceai_predict_variant gene_regions)
+target_link_libraries(cpliceai_predict_gene gene_regions)
 
 # Add reference module
 add_library(reference STATIC src/reference.c)
 target_link_libraries(cpliceai_reference reference)
-target_link_libraries(cpliceai reference)
-target_link_libraries(cpliceai_predict reference)
+target_link_libraries(cpliceai_predict_variant reference)
+target_link_libraries(cpliceai_predict_gene reference)
+
+# Add gene reference module
+add_library(gene_reference STATIC src/gene_reference.c)
+target_link_libraries(cpliceai_predict_variant gene_reference)
+target_link_libraries(cpliceai_predict_gene gene_reference)
 
 # Link external libraries
-target_link_libraries(cpliceai ${TENSORFLOW_LIBRARIES})
-target_link_libraries(cpliceai ${HTSLIB_LIBRARIES})
-
 target_link_libraries(cpliceai_reference ${TENSORFLOW_LIBRARIES})
 target_link_libraries(cpliceai_reference ${HTSLIB_LIBRARIES})
 
-target_link_libraries(cpliceai_predict ${TENSORFLOW_LIBRARIES})
-target_link_libraries(cpliceai_predict ${HTSLIB_LIBRARIES})
+target_link_libraries(cpliceai_predict_variant ${TENSORFLOW_LIBRARIES})
+target_link_libraries(cpliceai_predict_variant ${HTSLIB_LIBRARIES})
+
+target_link_libraries(cpliceai_predict_gene ${TENSORFLOW_LIBRARIES})
+target_link_libraries(cpliceai_predict_gene ${HTSLIB_LIBRARIES})
 
 
 # Build SO
-add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c)
+add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c src/gene_regions.c src/reference.c)
 target_include_directories(libcpliceai PUBLIC src/)
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
 target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES})
 target_link_libraries(libcpliceai PRIVATE ${HTSLIB_LIBRARIES})
-
-target_compile_options(cpliceai_reference PRIVATE -mf16c)
 
 # Install library
 install(TARGETS libcpliceai
@@ -100,6 +104,8 @@ install(FILES
     src/utils.h
     src/predict.h
     src/range.h
+    src/gene_regions.h
+    src/reference.h
     DESTINATION include/cpliceai)
 
 

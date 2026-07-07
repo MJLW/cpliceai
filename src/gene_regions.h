@@ -27,7 +27,7 @@ typedef struct {
  *
  * Returns EXIT_SUCCESS on success, -1 on file end, EXIT_FAILURE on parsing failure.
  */
-int read_gene_region(FILE *fp, Gene *gene);
+extern int read_gene_region(FILE *fp, Gene *gene);
 
 
 #endif /* GENE_REGIONS_H */

@@ -1,5 +1,4 @@
 #include "utils.h"
-#include "logging/log.h"
 
 void reverse_encoding(float enc[], int len) {
     float tmp;
@@ -40,17 +39,74 @@ char *pad_sequence(const char *seq, const Range boundary, const int width) {
     return padded_seq;
 }
 
-char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen) {
-    int alt_seq_len = len - rlen + alen;
-    char *alt_seq = malloc(alt_seq_len + 1);
+void create_alt_seq(const kstring_t *ref_seq, const uint64_t pos, const int ref_len, const int alt_len, const char *alt, char *alt_seq[], size_t *alt_seq_len) {
+    const int new_seq_len = ref_seq->l + alt_len - ref_len;
+    char *new_seq = malloc(new_seq_len + 1);
+    new_seq[new_seq_len] = '\0';
 
-    int c = 0;
-    for (; c < len/2; c++) alt_seq[c] = seq[c];
-    for (int ai = 0; ai < alen; ai++, c++) alt_seq[c] = alt[ai];
-    for (int ri = len/2 + rlen; ri < len; c++, ri++) alt_seq[c] = seq[ri];
-    alt_seq[alt_seq_len] = '\0';
+    // Copy everything before variant
+    memcpy(
+        new_seq,
+        ref_seq->s,
+        pos
+    );
 
-    return alt_seq;
+    // Copy over alt
+    memcpy(
+        new_seq + pos,
+        alt,
+        alt_len
+    );
+
+    // Copy everything after variant
+    memcpy(
+        new_seq + pos + alt_len,
+        ref_seq->s + (pos + ref_len),
+        ref_seq->l - (pos + ref_len)
+    );
+
+    *alt_seq = new_seq;
+    *alt_seq_len = new_seq_len;
+}
+
+void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt) {
+    if (alt_len > ref_len) { // Insertion
+        float max_donor = 0, max_acceptor = 0;
+        for (int i = 0; i < alt_len; i++) {
+            int index = (gene_pos + i) * NUM_SCORES;
+
+            if (alt[index + DONOR_POS] > max_donor) {
+                max_donor = alt[index + DONOR_POS];
+            }
+            if (alt[index + ACCEPTOR_POS] > max_acceptor) {
+                max_acceptor = alt[index + ACCEPTOR_POS];
+            }
+        }
+
+        memmove(
+            alt + ((gene_pos + ref_len) * NUM_SCORES),
+            alt + ((gene_pos + alt_len) * NUM_SCORES),
+            (gene_len - (gene_pos + ref_len)) * NUM_SCORES * sizeof(float)
+        );
+
+        alt[gene_pos * NUM_SCORES] = max_donor + max_donor > 1.0 ? 0 : 1 - max_donor - max_acceptor;
+        alt[gene_pos * NUM_SCORES + ACCEPTOR_POS] = max_acceptor;
+        alt[gene_pos * NUM_SCORES + DONOR_POS] = max_donor;
+    } else if (alt_len < ref_len) { // Deletion
+        alt = realloc(alt, gene_len * NUM_SCORES * sizeof(float));
+
+        memmove(
+            alt + ((gene_pos + ref_len) * NUM_SCORES),
+            alt + ((gene_pos + alt_len) * NUM_SCORES),
+            (gene_len - (gene_pos + ref_len)) * NUM_SCORES * sizeof(float)
+        );
+
+        for (int i = (gene_pos + alt_len) * NUM_SCORES; i < (gene_pos + ref_len) * NUM_SCORES; i += NUM_SCORES) {
+            alt[i] = 1.0;
+            alt[i + ACCEPTOR_POS] = 0.0;
+            alt[i + DONOR_POS] = 0.0;
+        }
+    }
 }
 
 int one_hot_encode(const char *sequence, const int len, float *encoding) {

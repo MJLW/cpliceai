@@ -96,7 +96,7 @@ typedef struct {
     uint64_t off_block;
 } FileHeader;
 
-int reference_alloc(
+int Reference_alloc(
     Reference *ref,
     size_t m_contigs,
     size_t contig_names_cap,
@@ -109,24 +109,24 @@ int reference_alloc(
 /*
  * MANIPULATIONS
  */
-void reference_free(Reference *ref);
+void Reference_free(Reference *ref);
 
-void reference_add_score(const PositionScore score, Reference *ref);
+void Reference_add_score(const PositionScore score, Reference *ref);
 
-void reference_add_chunk(const Chunk chunk, Reference *ref);
+void Reference_add_chunk(const Chunk chunk, Reference *ref);
 
-void reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref);
+void Reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref);
 
-void reference_add_contig(const Contig contig, const char *name, Reference *ref);
+void Reference_add_contig(const Contig contig, const char *name, Reference *ref);
 
 
 /*
 * IO
 */
-int reference_write(const char *path, const Reference *ref);
+int Reference_write(const char *path, const Reference *ref);
 
-int reference_read(const char *path, Reference *ref);
+int Reference_read(const char *path, Reference *ref);
 
-void reference_unmap(char *base, size_t size);
+void Reference_unmap(char *base, size_t size);
 
 #endif

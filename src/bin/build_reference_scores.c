@@ -12,11 +12,11 @@
 #include <htslib/tbx.h>
 #include <htslib/regidx.h>
 
-#include "logging/log.h"
-#include "predict.h"
-#include "reference.h"
-#include "gene_regions.h"
-#include "utils.h"
+#include "../logging/log.h"
+#include "../predict.h"
+#include "../reference.h"
+#include "../gene_regions.h"
+#include "../utils.h"
 
 
 #define REQUIRED_ARGS \
@@ -64,13 +64,15 @@ int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
     free(current_contig);
     rewind(gene_regions);
 
-    reference_alloc(ref, n_contigs, contig_bytes, n_regions, region_bytes, n_chunks, n_chunks);
+    Reference_alloc(ref, n_contigs, contig_bytes, n_regions, region_bytes, n_chunks, n_chunks);
 
     return EXIT_SUCCESS;
 }
 
 int main(int argc, char *argv[]) {
-    setenv("TF_CPP_MIN_LOG_LEVEL", "1", 1);
+    setenv("TF_CPP_MIN_LOG_LEVEL", "2", 1);
+    setenv("NVIDIA_TF32_OVERRIDE", "1", 1);
+    setenv("TF_CUDNN_USE_AUTOTUNE", "0", 1);
 
     args_t args = make_default_args();
     if (!parse_args(argc, argv, &args) || args.help) {
@@ -111,7 +113,7 @@ int main(int argc, char *argv[]) {
         // if (counter++ >= 10) break;
         if (current_region == NULL || strncmp(gene.chrom, current_region, GENE_CHROM_MAX) != 0) {
             Contig contig = { .n_regions = 0, .region_start = ref.n_genes, .name_start = ref.contig_names_len};
-            reference_add_contig(contig, gene.chrom, &ref);
+            Reference_add_contig(contig, gene.chrom, &ref);
 
             if (current_region != NULL) free(current_region);
             current_region = strndup(gene.chrom, GENE_CHROM_MAX);
@@ -119,7 +121,7 @@ int main(int argc, char *argv[]) {
 
         uint64_t size = gene.tx_end - gene.tx_start;
         Region region = { .n_chunks = 0, .chunk_size = CHUNK_SIZE, .size = size, .strand = gene.strand, .chunk_start = ref.n_chunks, .name_start = ref.region_names_len };
-        reference_add_region(region, gene.name, gene.tx_start, gene.tx_end, &ref);
+        Reference_add_region(region, gene.name, gene.tx_start, gene.tx_end, &ref);
 
         /*
         * Run SpliceAI models over entire pre-mRNA
@@ -160,7 +162,7 @@ int main(int argc, char *argv[]) {
         // Turn predictions into chunks and PositionScores
         for (uint64_t i = 0; i < size; i += CHUNK_SIZE) {
             Chunk chunk = { .n_scores = 0, .scores_start = ref.n_scores };
-            reference_add_chunk(chunk, &ref);
+            Reference_add_chunk(chunk, &ref);
 
             // Iterate over scores in chunk
             for (uint64_t j = i; j < i + CHUNK_SIZE && j < size; j++) {
@@ -168,7 +170,7 @@ int main(int argc, char *argv[]) {
                 if (gene_predictions[prediction_index + ACCEPTOR_POS] < ZERO_EPSILON && gene_predictions[prediction_index + DONOR_POS] < ZERO_EPSILON) continue;
 
                 PositionScore score = { .pos = j, .acceptor = gene_predictions[prediction_index + ACCEPTOR_POS], .donor = gene_predictions[prediction_index + DONOR_POS] };
-                reference_add_score(score, &ref);
+                Reference_add_score(score, &ref);
                 // printf("%i,%f,%f\n", score.pos, score.acceptor, score.donor);
             }
         }
@@ -179,12 +181,8 @@ int main(int argc, char *argv[]) {
     free(current_region);
 
     log_info("Writing out binarized reference to: %s", output_path);
-    reference_write(output_path, &ref);
-
-    Reference test;
-    reference_read(output_path, &test);
-
-    reference_free(&ref);
+    Reference_write(output_path, &ref);
+    Reference_free(&ref);
 
     fclose(gene_regions_in);
     fai_destroy(fa_in);
