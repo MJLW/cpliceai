@@ -48,7 +48,7 @@ extern char *pad_sequence(const char *seq, const Range boundary, const int width
 
 extern void create_alt_seq(const kstring_t *ref_seq, const uint64_t pos, const int ref_len, const int alt_len, const char *alt, char *alt_seq[], size_t *alt_seq_len);
 
-extern void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt);
+extern void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt[]);
 
 extern int one_hot_encode(const char *sequence, const int len, float *encoding_out);
 

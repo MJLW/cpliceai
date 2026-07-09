@@ -69,44 +69,47 @@ void create_alt_seq(const kstring_t *ref_seq, const uint64_t pos, const int ref_
     *alt_seq_len = new_seq_len;
 }
 
-void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt) {
+void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt[]) {
+    float *tmp = *alt;
     if (alt_len > ref_len) { // Insertion
         float max_donor = 0, max_acceptor = 0;
         for (int i = 0; i < alt_len; i++) {
             int index = (gene_pos + i) * NUM_SCORES;
 
-            if (alt[index + DONOR_POS] > max_donor) {
-                max_donor = alt[index + DONOR_POS];
+            if (tmp[index + DONOR_POS] > max_donor) {
+                max_donor = tmp[index + DONOR_POS];
             }
-            if (alt[index + ACCEPTOR_POS] > max_acceptor) {
-                max_acceptor = alt[index + ACCEPTOR_POS];
+            if (tmp[index + ACCEPTOR_POS] > max_acceptor) {
+                max_acceptor = tmp[index + ACCEPTOR_POS];
             }
         }
 
         memmove(
-            alt + ((gene_pos + ref_len) * NUM_SCORES),
-            alt + ((gene_pos + alt_len) * NUM_SCORES),
+            tmp + ((gene_pos + ref_len) * NUM_SCORES),
+            tmp + ((gene_pos + alt_len) * NUM_SCORES),
             (gene_len - (gene_pos + ref_len)) * NUM_SCORES * sizeof(float)
         );
 
-        alt[gene_pos * NUM_SCORES] = max_donor + max_donor > 1.0 ? 0 : 1 - max_donor - max_acceptor;
-        alt[gene_pos * NUM_SCORES + ACCEPTOR_POS] = max_acceptor;
-        alt[gene_pos * NUM_SCORES + DONOR_POS] = max_donor;
+        tmp[gene_pos * NUM_SCORES] = max_donor + max_acceptor > 1.0 ? 0 : 1 - max_donor - max_acceptor;
+        tmp[gene_pos * NUM_SCORES + ACCEPTOR_POS] = max_acceptor;
+        tmp[gene_pos * NUM_SCORES + DONOR_POS] = max_donor;
     } else if (alt_len < ref_len) { // Deletion
-        alt = realloc(alt, gene_len * NUM_SCORES * sizeof(float));
+        tmp = realloc(tmp, gene_len * NUM_SCORES * sizeof(float));
 
         memmove(
-            alt + ((gene_pos + ref_len) * NUM_SCORES),
-            alt + ((gene_pos + alt_len) * NUM_SCORES),
+            tmp + ((gene_pos + ref_len) * NUM_SCORES),
+            tmp + ((gene_pos + alt_len) * NUM_SCORES),
             (gene_len - (gene_pos + ref_len)) * NUM_SCORES * sizeof(float)
         );
 
         for (int i = (gene_pos + alt_len) * NUM_SCORES; i < (gene_pos + ref_len) * NUM_SCORES; i += NUM_SCORES) {
-            alt[i] = 1.0;
-            alt[i + ACCEPTOR_POS] = 0.0;
-            alt[i + DONOR_POS] = 0.0;
+            tmp[i] = 1.0;
+            tmp[i + ACCEPTOR_POS] = 0.0;
+            tmp[i + DONOR_POS] = 0.0;
         }
     }
+
+    *alt = tmp;
 }
 
 int one_hot_encode(const char *sequence, const int len, float *encoding) {

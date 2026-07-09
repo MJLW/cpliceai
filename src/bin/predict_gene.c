@@ -172,8 +172,6 @@ int main(int argc, char *argv[]) {
             GeneReference_update(variant.chr, variant.gene, fa_in, &ref, &current_gene);
         }
 
-        clock_t start = clock();
-
         // Replace ref by alt in gene sequence
         const int ref_len = strnlen(variant.ref, MAX_FIELD);
         const int alt_len = strnlen(variant.alt, MAX_FIELD);
@@ -206,15 +204,10 @@ int main(int argc, char *argv[]) {
 
         // Fix predictions order
         if (alt_len != ref_len) {
-            align_predictions_alt_to_ref(pos_in_gene, current_gene.seq.l, ref_len, alt_len, alt_predictions);
+            align_predictions_alt_to_ref(pos_in_gene, current_gene.seq.l, ref_len, alt_len, &alt_predictions);
         }
 
-        clock_t end = clock();
-        double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
-
         log_info("%s\t%li\t%li\t%s\t%c\t%i", variant.chr, current_gene.start, current_gene.end, current_gene.name, current_gene.strand, current_gene.end - current_gene.start);
-
-        fprintf(output, "!%s:%.3f\n", current_gene.name, elapsed);
 
         for (int i = 0; i < current_gene.seq.l; i++) {
             const float ref_acceptor = current_gene.scores[i * NUM_SCORES + ACCEPTOR_POS];
