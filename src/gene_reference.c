@@ -23,6 +23,7 @@ int GeneReference_update(const char *chr, const char *name, const faidx_t *fa, c
         gene->seq.m = 0;
     }
 
+    log_info("%s", name);
     // Find contig
     int contig_index = -1;
     for (int i = 0; i < reference->n_contigs; i++) {
@@ -55,7 +56,7 @@ int GeneReference_update(const char *chr, const char *name, const faidx_t *fa, c
     }
 
     if (gene_index == -1) {
-        log_warn("Could not find matching gene %s on contig %s in reference scores", gene, chr);
+        log_warn("Could not find matching gene %s on contig %s in reference scores", name, chr);
         return EXIT_FAILURE;
     }
 
