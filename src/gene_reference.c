@@ -23,7 +23,6 @@ int GeneReference_update(const char *chr, const char *name, const faidx_t *fa, c
         gene->seq.m = 0;
     }
 
-    log_info("%s", name);
     // Find contig
     int contig_index = -1;
     for (int i = 0; i < reference->n_contigs; i++) {
