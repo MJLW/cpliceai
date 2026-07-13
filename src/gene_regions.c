@@ -32,11 +32,11 @@ static int parse_line(const char *line, Gene *gene)
 
     tok = strtok(NULL, delim);
     if (!tok) return EXIT_FAILURE;
-    gene->tx_start = (int64_t)atoll(tok);
+    gene->tx_start = (int64_t)atoll(tok) - 1;
 
     tok = strtok(NULL, delim);
     if (!tok) return EXIT_FAILURE;
-    gene->tx_end = (int64_t)atoll(tok);
+    gene->tx_end = (int64_t)atoll(tok) - 1;
 
     return 0;
 }

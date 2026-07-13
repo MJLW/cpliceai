@@ -165,12 +165,12 @@ int main(int argc, char *argv[]) {
     GeneReference_init(&current_gene);
 
     while (Variant_tsv_read_next(variants_fp, &variant) == EXIT_SUCCESS) {
-        fprintf(output, "#%s-%li-%s-%s\n", variant.chr, variant.pos+1, variant.ref, variant.alt);
-
         // If gene is different from previous variant, we need to load the reference scores for the current gene
         if (strcmp(variant.gene, current_gene.name) != 0) {
             GeneReference_update(variant.chr, variant.gene, fa_in, &ref, &current_gene);
         }
+
+        fprintf(output, "#%s_%c_%li_%li:%s_%li_%s_%s\n", variant.gene, current_gene.strand, current_gene.start, current_gene.end, variant.chr, variant.pos+1, variant.ref, variant.alt);
 
         // Replace ref by alt in gene sequence
         const int ref_len = strnlen(variant.ref, MAX_FIELD);
@@ -218,7 +218,7 @@ int main(int argc, char *argv[]) {
 
             if (ref_acceptor < SCORE_THRESHOLD && ref_donor < SCORE_THRESHOLD && alt_acceptor < SCORE_THRESHOLD && alt_donor < SCORE_THRESHOLD) continue;
 
-            fprintf(output, "%i\t%f\t%f\t%f\t%f\n", i, ref_acceptor, ref_donor, alt_acceptor, alt_donor);
+            fprintf(output, "%li\t%f\t%f\t%f\t%f\n", i + current_gene.start + 1, ref_acceptor, ref_donor, alt_acceptor, alt_donor);
         }
 
         free(alt_predictions);
