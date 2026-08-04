@@ -1,9 +1,11 @@
-#ifndef UTILS_HEADER
-#define UTILS_HEADER
+#ifndef UTILS_H
+#define UTILS_H
 
-#include <htslib/hts.h>
-#include <htslib/vcf.h>
-#include <htslib/tbx.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include <htslib/kstring.h>
 
 #include "range.h"
 
@@ -38,19 +40,23 @@ typedef struct {
     int dl_idx;
 } Score;
 
-extern void reverse_encoding(float enc[], int len);
+FILE *open_file_or_log(const char *path, const char *mode);
 
-extern void reverse_prediction(float preds[], int len, int size);
+void reverse_encoding(float enc[], int len);
 
-extern Range find_transcript_boundary(const int position, const int start, const int end, const int width);
+void reverse_prediction(float preds[], int len, int size);
 
-extern char *pad_sequence(const char *seq, const Range boundary, const int width);
+Range find_transcript_boundary(const int position, const int start, const int end, const int width);
 
-extern char *replace_variant(const char *seq, const int len, const int rlen, const char *alt, const int alen);
+char *pad_sequence(const char *seq, const Range boundary, const int width);
 
-extern int one_hot_encode(const char *sequence, const int len, float *encoding_out[]);
+void create_alt_seq(const kstring_t *ref_seq, const uint64_t pos, const int ref_len, const int alt_len, const char *alt, char *alt_seq[], size_t *alt_seq_len);
 
-extern Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset);
+void align_predictions_alt_to_ref(const uint64_t gene_pos, const uint64_t gene_len, const int ref_len, const int alt_len, float *alt[]);
+
+int one_hot_encode(const char *sequence, const int len, float *encoding_out);
+
+Score calculate_delta_scores(char *allele, char *gene_symbol, float *predictions_ref, float *predictions_alt, int len, int offset);
 
 #endif
 

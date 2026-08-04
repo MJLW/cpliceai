@@ -1,52 +1,105 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(CMAKE_C_STANDARD 99)
-set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall -g")
-set(CMAKE_CXX_FLAGS_RELEASE_INIT "-O3")
-
 project(CpliceAI C)
+
+enable_testing()
+
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -g")
+set(CMAKE_C_FLAGS_RELEASE_INIT "-O3")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/externals/sanitizers-cmake/cmake" ${CMAKE_MODULE_PATH})
 
-include_directories(include)
+include_directories(externals)
 
-# Add tensorflow
-#include_directories(${CMAKE_SOURCE_DIR}/tensorflow/include)
-#link_directories(${CMAKE_SOURCE_DIR}/tensorflow/lib)
+find_package(Sanitizers)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(TENSORFLOW REQUIRED tensorflow)
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
-# Create executable
-add_executable(cpliceai src/cpliceai.c)
-
-# Add logging module
+# Shared static libraries used across the executables
 add_library(logging STATIC src/logging/log.c)
-target_include_directories(cpliceai PRIVATE src/logging)
-target_link_libraries(cpliceai logging)
-
-# Add predict module
 add_library(predict STATIC src/predict.c)
-target_link_libraries(cpliceai predict)
-
-# Add utils module
 add_library(utils STATIC src/utils.c)
-target_link_libraries(cpliceai utils)
-
-# Add range module
 add_library(range STATIC src/range.c)
-target_link_libraries(cpliceai range)
+add_library(gene_regions STATIC src/gene_regions.c)
+add_library(reference STATIC src/reference.c)
+add_library(gene_reference STATIC src/gene_reference.c)
 
-# Link external libraries
-target_link_libraries(cpliceai ${TENSORFLOW_LIBRARIES})
-target_link_libraries(cpliceai ${HTSLIB_LIBRARIES})
+set(CPLICEAI_COMMON_LIBS logging predict utils range gene_regions reference)
 
-# Build SO
-add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c)
+# Executables
+add_executable(cpliceai_reference src/bin/build_reference_scores.c)
+target_link_libraries(cpliceai_reference PRIVATE
+    ${CPLICEAI_COMMON_LIBS}
+    ${TENSORFLOW_LIBRARIES}
+    ${HTSLIB_LIBRARIES})
+
+add_executable(cpliceai_predict_variant src/bin/predict_variant.c)
+target_link_libraries(cpliceai_predict_variant PRIVATE
+    ${CPLICEAI_COMMON_LIBS}
+    gene_reference
+    ${TENSORFLOW_LIBRARIES}
+    ${HTSLIB_LIBRARIES})
+
+add_executable(cpliceai_predict_gene src/bin/predict_gene.c)
+target_link_libraries(cpliceai_predict_gene PRIVATE
+    ${CPLICEAI_COMMON_LIBS}
+    gene_reference
+    ${TENSORFLOW_LIBRARIES}
+    ${HTSLIB_LIBRARIES})
+
+foreach(cpliceai_target cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
+    add_sanitizers(${cpliceai_target})
+endforeach()
+
+# End-to-end tests (bats-core), wired into CTest and `make check`
+find_program(BATS_EXECUTABLE bats REQUIRED)
+
+set(CPLICEAI_TEST_ENVIRONMENT
+    "CPLICEAI_REFERENCE_BIN=$<TARGET_FILE:cpliceai_reference>"
+    "CPLICEAI_PREDICT_VARIANT_BIN=$<TARGET_FILE:cpliceai_predict_variant>"
+    "CPLICEAI_PREDICT_GENE_BIN=$<TARGET_FILE:cpliceai_predict_gene>"
+    "MODEL_DIR=${CMAKE_SOURCE_DIR}/models"
+    "FIXTURES_DIR=${CMAKE_SOURCE_DIR}/tests/fixtures")
+
+# Fast tests: argument parsing only, binaries exit before loading TF models.
+foreach(cli_test reference predict_variant predict_gene)
+    set(test_name "cli_${cli_test}")
+    add_test(NAME ${test_name}
+        COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/cli/${cli_test}.bats)
+    set_tests_properties(${test_name} PROPERTIES
+        ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+        LABELS "cli"
+        TIMEOUT 60)
+endforeach()
+
+# Slow test: runs real TensorFlow inference (model loading x3 invocations)
+# over a tiny synthetic fixture, end to end across all three binaries.
+add_test(NAME e2e_pipeline
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/pipeline.bats)
+set_tests_properties(e2e_pipeline PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 300)
+
+add_custom_target(check
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
+
+# Shared library
+add_library(libcpliceai SHARED
+    src/predict.c
+    src/utils.c
+    src/range.c
+    src/gene_regions.c
+    src/reference.c
+    src/gene_reference.c
+    src/logging/log.c)
 target_include_directories(libcpliceai PUBLIC src/)
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
-target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES})
-target_link_libraries(libcpliceai PRIVATE ${HTSLIB_LIBRARIES})
+target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES} ${HTSLIB_LIBRARIES})
 
 # Install library
 install(TARGETS libcpliceai
@@ -54,9 +107,12 @@ install(TARGETS libcpliceai
         ARCHIVE DESTINATION lib
         PUBLIC_HEADER DESTINATION include)
 
-# Include headers
+# Install headers
 install(FILES
     src/utils.h
     src/predict.h
     src/range.h
+    src/gene_regions.h
+    src/reference.h
+    src/gene_reference.h
     DESTINATION include/cpliceai)

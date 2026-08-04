@@ -1,0 +1,21 @@
+{
+  "name": "claude",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USERNAME": "dev",
+      "USER_UID": "1000",
+      "USER_GID": "1000"
+    }
+  },
+  "remoteUser": "dev",
+  "updateRemoteUserUID": true,
+  "containerEnv": {
+
+  },
+  "mounts": [
+    "source=/media/data/reference_files,target=/workspaces/reference_files,type=bind,consistency=cached"
+  ],
+  "workspaceFolder": "/workspaces/",
+  "customizations": { }
+}
