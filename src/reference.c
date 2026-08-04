@@ -6,7 +6,7 @@
 #include <string.h>
 
 
-void Reference_free(Reference *ref) {
+void reference_free(Reference *ref) {
     if (ref->block != NULL) free(ref->block);
 }
  
@@ -14,7 +14,7 @@ static inline size_t align_up(size_t offset, size_t align) {
     return (offset + align - 1) & ~(align - 1);
 }
 
-int Reference_alloc(
+int reference_alloc(
     Reference *ref,
     size_t m_contigs,
     size_t contig_names_cap,
@@ -93,7 +93,7 @@ int reference_resize(Reference *ref) {
     return EXIT_SUCCESS;
 }
 
-void Reference_add_score(const PositionScore score, Reference *ref) {
+void reference_add_score(const PositionScore score, Reference *ref) {
     if (ref->n_scores == ref->m_scores) {
         reference_resize(ref);
     }
@@ -102,12 +102,12 @@ void Reference_add_score(const PositionScore score, Reference *ref) {
     ref->chunks[ref->n_chunks-1].n_scores++;
 }
 
-void Reference_add_chunk(const Chunk chunk, Reference *ref) {
+void reference_add_chunk(const Chunk chunk, Reference *ref) {
     ref->chunks[ref->n_chunks++] = chunk;
     ref->genes[ref->n_genes-1].n_chunks++;
 }
 
-void Reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref) {
+void reference_add_region(const Region region, const char *name, const int64_t start, const int64_t end, Reference *ref) {
     ref->genes[ref->n_genes] = region;
     ref->gene_starts[ref->n_genes] = start;
     ref->gene_ends[ref->n_genes] = end;
@@ -119,7 +119,7 @@ void Reference_add_region(const Region region, const char *name, const int64_t s
     ref->region_names_len += len;
 }
 
-void Reference_add_contig(const Contig contig, const char *name, Reference *ref) {
+void reference_add_contig(const Contig contig, const char *name, Reference *ref) {
     ref->contigs[ref->n_contigs++] = contig;
 
     size_t len = strlen(name) + 1;
@@ -127,7 +127,7 @@ void Reference_add_contig(const Contig contig, const char *name, Reference *ref)
     ref->contig_names_len += len;
 }
 
-int Reference_write(const char *path, const Reference *ref) {
+int reference_write(const char *path, const Reference *ref) {
     // --- Calculate offsets ---
     size_t off = sizeof(FileHeader);
 
@@ -208,25 +208,25 @@ int Reference_write(const char *path, const Reference *ref) {
     // Clear mmap
     munmap(base, file_size);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-int Reference_read(const char *path, Reference *ref) {
+int reference_read(const char *path, Reference *ref) {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { perror("open"); return -1; }
+    if (fd < 0) { perror("open"); return EXIT_FAILURE; }
 
     FileHeader hdr;
-    if (read(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) { close(fd); return -1; }
+    if (read(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) { close(fd); return EXIT_FAILURE; }
 
     if (hdr.magic != REF_MAGIC || hdr.version != REF_VERSION) {
         fprintf(stderr, "Bad magic or version\n");
         close(fd);
-        return -1;
+        return EXIT_FAILURE;
     }
 
     char *base = mmap(NULL, hdr.file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (base == MAP_FAILED) { perror("mmap"); return -1; }
+    if (base == MAP_FAILED) { perror("mmap"); return EXIT_FAILURE; }
 
     // Hint to the kernel: we'll scan sequentially
     madvise(base, hdr.file_size, MADV_SEQUENTIAL);
@@ -257,9 +257,9 @@ int Reference_read(const char *path, Reference *ref) {
     ref->chunks        = (Chunk *)         (base + hdr.off_chunks);
     ref->scores        = (PositionScore *) (base + hdr.off_scores);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-void Reference_unmap(char *base, size_t size) {
+void reference_unmap(char *base, size_t size) {
     munmap(base, size);
 }

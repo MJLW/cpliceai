@@ -7,46 +7,29 @@
 #include "logging/log.h"
 #include "utils.h"
 
-#define SPLICEAI_MODEL_PREFIX "spliceai"
-#define NUM_SPLICEAI_MODELS 5
-#define SPLICEAI_TAGS "serve"
-
-#define CONTEXT_SIZE 10000
-#define BOUNDARY_SIZE 5000
-
-#define ENCODING_SIZE 4
-#define BASE_A 'A'
-#define BASE_A_ENC 0
-#define BASE_C 'C'
-#define BASE_C_ENC 1
-#define BASE_G 'G'
-#define BASE_G_ENC 2
-#define BASE_T 'T'
-#define BASE_T_ENC 3
-
-void deallocator(void* data, size_t a, void* b) {
+void deallocator(void *data, size_t a, void *b) {
     free(data);
 }
 
 void noop_deallocator(void *data, size_t a, void *b) {}
 
 // Check the status and print an error message if any
-int check_status(TF_Status* status, const char* msg) {
+int check_status(TF_Status *status, const char *msg) {
     if (TF_GetCode(status) != TF_OK) {
         fprintf(stderr, "Error: %s: %s\n", msg, TF_Message(status));
-        return 1;
+        return EXIT_FAILURE;
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
 
 static inline Model load_model(const char *path) {
-    TF_Status* status = TF_NewStatus();
-    TF_Graph* graph = TF_NewGraph();
-    TF_SessionOptions* sess_opts = TF_NewSessionOptions();
-    TF_Buffer* run_opts = NULL;
+    TF_Status *status = TF_NewStatus();
+    TF_Graph *graph = TF_NewGraph();
+    TF_SessionOptions *sess_opts = TF_NewSessionOptions();
+    TF_Buffer *run_opts = NULL;
 
-    const char* tags = SPLICEAI_TAGS;
-    TF_Session* session = TF_LoadSessionFromSavedModel(sess_opts, run_opts, path, &tags, 1, graph, NULL, status);
+    const char *tags = SPLICEAI_TAGS;
+    TF_Session *session = TF_LoadSessionFromSavedModel(sess_opts, run_opts, path, &tags, 1, graph, NULL, status);
     check_status(status, "Loading model");
 
     return (Model) { status, graph, sess_opts, run_opts, session };
@@ -54,6 +37,10 @@ static inline Model load_model(const char *path) {
 
 Model *load_models(const char *models_dir) {
     Model *models = malloc(NUM_SPLICEAI_MODELS * sizeof(Model));
+    if (models == NULL) {
+        log_fatal("Failed to allocate %zu bytes for models", NUM_SPLICEAI_MODELS * sizeof(Model));
+        exit(EXIT_FAILURE);
+    }
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
         kstring_t model_path = {0};
         kputs(models_dir, &model_path);
@@ -92,7 +79,7 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
     // float *chunked_outputs[num_data];
     // for (int i = 0; i < num_data; i++) chunked_outputs[i] = out + i * chunk_len;
 
-    int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE)* 3;
+    int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
     float *outputs = calloc(output_len, sizeof(float));
 
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
@@ -127,7 +114,7 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
         // check_status(model.status, "Running model");
         if (TF_GetCode(model.status) != TF_OK) {
             log_error("Error running the model: %s", TF_Message(model.status));
-            return 1;
+            return EXIT_FAILURE;
         }
 
         // Process the output data
@@ -145,6 +132,26 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
     *num_out = output_len;
     *out = outputs;
 
-    return 0;
+    return EXIT_SUCCESS;
+}
+
+int predict_padded_sequence(Model *models, const char *seq, int seq_len, char strand, float **predictions, int *num_predictions) {
+    float *encoding = malloc(seq_len * ENCODING_SIZE * sizeof(float));
+    if (encoding == NULL) {
+        log_fatal("Failed to allocate %zu bytes for sequence encoding", seq_len * ENCODING_SIZE * sizeof(float));
+        exit(EXIT_FAILURE);
+    }
+    memset(encoding, 0, seq_len * ENCODING_SIZE * sizeof(float));
+    int encoding_len = one_hot_encode(seq, seq_len, encoding);
+
+    if (strand == '-') reverse_encoding(encoding, encoding_len);
+
+    int ret = predict(models, encoding_len, 1, encoding, num_predictions, predictions);
+    free(encoding);
+    if (ret != EXIT_SUCCESS) return ret;
+
+    if (strand == '-') reverse_prediction(*predictions, *num_predictions, NUM_SCORES);
+
+    return EXIT_SUCCESS;
 }
 

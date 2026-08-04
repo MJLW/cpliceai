@@ -1,5 +1,5 @@
-#ifndef RANGE_HEADER
-#define RANGE_HEADER
+#ifndef RANGE_H
+#define RANGE_H
 
 #include <inttypes.h>
 #include <stdint.h>

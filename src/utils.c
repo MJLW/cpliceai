@@ -1,5 +1,18 @@
 #include "utils.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "logging/log.h"
+
+FILE *open_file_or_log(const char *path, const char *mode) {
+    FILE *fp = fopen(path, mode);
+    if (fp == NULL) {
+        log_error("Could not open file: %s", path);
+    }
+    return fp;
+}
+
 void reverse_encoding(float enc[], int len) {
     float tmp;
     for (int i = 0, j = len - 1; i < j; i++, j--) {
@@ -29,6 +42,10 @@ Range find_transcript_boundary(const int position, const int start, const int en
 
 char *pad_sequence(const char *seq, const Range boundary, const int width) {
     char *padded_seq = malloc(width + 1);
+    if (padded_seq == NULL) {
+        log_fatal("Failed to allocate %d bytes for padded sequence", width + 1);
+        exit(EXIT_FAILURE);
+    }
 
     int c = 0;
     for (; c < boundary.start; c++) padded_seq[c] = 'N';
@@ -42,6 +59,10 @@ char *pad_sequence(const char *seq, const Range boundary, const int width) {
 void create_alt_seq(const kstring_t *ref_seq, const uint64_t pos, const int ref_len, const int alt_len, const char *alt, char *alt_seq[], size_t *alt_seq_len) {
     const int new_seq_len = ref_seq->l + alt_len - ref_len;
     char *new_seq = malloc(new_seq_len + 1);
+    if (new_seq == NULL) {
+        log_fatal("Failed to allocate %d bytes for alt sequence", new_seq_len + 1);
+        exit(EXIT_FAILURE);
+    }
     new_seq[new_seq_len] = '\0';
 
     // Copy everything before variant

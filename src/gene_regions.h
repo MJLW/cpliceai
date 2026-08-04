@@ -4,15 +4,14 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define GENE_NAME_MAX  256
-#define GENE_CHROM_MAX 256
+#define FIELD_MAX_LEN 256
 
 #define POSITIVE_STRAND '+'
 #define NEGATIVE_STRAND '-'
 
 typedef struct {
-    char    name[GENE_NAME_MAX];
-    char    chrom[GENE_CHROM_MAX];
+    char    name[FIELD_MAX_LEN];
+    char    chrom[FIELD_MAX_LEN];
     char    strand;
     int64_t tx_start;
     int64_t tx_end;
@@ -27,7 +26,19 @@ typedef struct {
  *
  * Returns EXIT_SUCCESS on success, -1 on file end, EXIT_FAILURE on parsing failure.
  */
-extern int read_gene_region(FILE *fp, Gene *gene);
+int read_gene_region(FILE *fp, Gene *gene);
+
+/*
+ * next_tsv_field - Consume the next tab-delimited field from *cursor, in place (mutates the
+ * underlying buffer by writing a '\0' at the delimiter, like strtok). Advances *cursor past the
+ * field so the next call returns the following field.
+ *
+ * Parameters:
+ *   cursor - pointer to the current position in a mutable, NUL-terminated buffer.
+ *
+ * Returns a pointer to the NUL-terminated field, or NULL if no field remains.
+ */
+char *next_tsv_field(char **cursor);
 
 
 #endif /* GENE_REGIONS_H */

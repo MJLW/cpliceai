@@ -87,7 +87,7 @@ target_link_libraries(cpliceai_predict_gene ${HTSLIB_LIBRARIES})
 
 
 # Build SO
-add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c src/gene_regions.c src/reference.c)
+add_library(libcpliceai SHARED src/predict.c src/utils.c src/range.c src/gene_regions.c src/reference.c src/gene_reference.c src/logging/log.c)
 target_include_directories(libcpliceai PUBLIC src/)
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
 target_link_libraries(libcpliceai PRIVATE ${TENSORFLOW_LIBRARIES})
@@ -106,6 +106,7 @@ install(FILES
     src/range.h
     src/gene_regions.h
     src/reference.h
+    src/gene_reference.h
     DESTINATION include/cpliceai)
 
 

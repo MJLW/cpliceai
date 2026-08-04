@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <time.h>
 
 #include <htslib/faidx.h>
 #include <string.h>
@@ -17,9 +16,7 @@
 #include "../utils.h"
 
 #define MAX_LINE 8192
-#define MAX_FIELD 256
 
-#define INITIAL_REF_SIZE_MALLOC 100000
 #define SCORE_THRESHOLD ZERO_EPSILON
 
 #define REQUIRED_ARGS \
@@ -36,11 +33,11 @@
 
 
 typedef struct {
-    char chr[MAX_FIELD];
+    char chr[FIELD_MAX_LEN];
     uint64_t pos;
-    char ref[MAX_FIELD];
-    char alt[MAX_FIELD];
-    char gene[MAX_FIELD];
+    char ref[FIELD_MAX_LEN];
+    char alt[FIELD_MAX_LEN];
+    char gene[FIELD_MAX_LEN];
 } Variant;
 
 static int parse_line(const char *line, Variant *snv) {
@@ -49,17 +46,17 @@ static int parse_line(const char *line, Variant *snv) {
     buf[MAX_LINE-1] = '\0';
     buf[strcspn(buf, "\r\n")] = '\0';
 
-    const char *delim = "\t";
+    char *cursor = buf;
     char *tok;
-    tok = strtok(buf, delim);
+    tok = next_tsv_field(&cursor);
     if (!tok) {
         log_error("Failed to parse SNV contig from line: %s", line);
         return EXIT_FAILURE;
     }
-    strncpy(snv->chr, tok, MAX_FIELD-1);
-    snv->chr[MAX_FIELD-1] = '\0';
+    strncpy(snv->chr, tok, FIELD_MAX_LEN-1);
+    snv->chr[FIELD_MAX_LEN-1] = '\0';
 
-    tok = strtok(NULL, delim);
+    tok = next_tsv_field(&cursor);
     if (!tok) {
         log_error("Failed to parse SNV position from line: %s", line);
         return EXIT_FAILURE;
@@ -71,34 +68,34 @@ static int parse_line(const char *line, Variant *snv) {
         return EXIT_FAILURE;
     }
 
-    tok = strtok(NULL, delim);
+    tok = next_tsv_field(&cursor);
     if (!tok) {
         log_error("Failed to parse reference base(s) from line: %s", line);
         return EXIT_FAILURE;
     }
-    strncpy(snv->ref, tok, MAX_FIELD-1);
-    snv->ref[MAX_FIELD-1] = '\0';
+    strncpy(snv->ref, tok, FIELD_MAX_LEN-1);
+    snv->ref[FIELD_MAX_LEN-1] = '\0';
 
-    tok = strtok(NULL, delim);
+    tok = next_tsv_field(&cursor);
     if (!tok) {
         log_error("Failed to parse alternative base(s) from line: %s", line);
         return EXIT_FAILURE;
     }
-    strncpy(snv->alt, tok, MAX_FIELD-1);
-    snv->alt[MAX_FIELD-1] = '\0';
+    strncpy(snv->alt, tok, FIELD_MAX_LEN-1);
+    snv->alt[FIELD_MAX_LEN-1] = '\0';
 
-    tok = strtok(NULL, delim);
+    tok = next_tsv_field(&cursor);
     if (!tok) {
         log_error("Failed to parse SNV gene from line: %s", line);
         return EXIT_FAILURE;
     }
-    strncpy(snv->gene, tok, MAX_FIELD-1);
-    snv->gene[MAX_FIELD-1] = '\0';
+    strncpy(snv->gene, tok, FIELD_MAX_LEN-1);
+    snv->gene[FIELD_MAX_LEN-1] = '\0';
 
     return EXIT_SUCCESS;
 }
 
-int Variant_tsv_read_next(FILE *fp, Variant *variant) {
+int variant_tsv_read_next(FILE *fp, Variant *variant) {
     char line[MAX_LINE];
 
     // WARN: Assumes skipped/no header
@@ -115,6 +112,63 @@ int Variant_tsv_read_next(FILE *fp, Variant *variant) {
     }
 
     return EXIT_FAILURE;
+}
+
+int process_variant_row(Model *models, faidx_t *fa, const Reference *ref, GeneReference *current_gene, const Variant *variant, float **alt_predictions, int *num_alt_predictions) {
+    // If gene is different from previous variant, we need to load the reference scores for the current gene
+    if (strncmp(variant->gene, current_gene->name, FIELD_MAX_LEN) != 0) {
+        if (gene_reference_update(variant->chr, variant->gene, fa, ref, current_gene) != EXIT_SUCCESS) {
+            log_warn("Failed to find reference for gene %s. Skipping variant %s:%li.", variant->gene, variant->chr, variant->pos + 1);
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Replace ref by alt in gene sequence
+    const int ref_len = strnlen(variant->ref, FIELD_MAX_LEN);
+    const int alt_len = strnlen(variant->alt, FIELD_MAX_LEN);
+    const uint64_t pos_in_gene = variant->pos - current_gene->start;
+
+    kstring_t alt = { 0 };
+    create_alt_seq(&current_gene->seq, pos_in_gene, ref_len, alt_len, variant->alt, &(alt.s), &(alt.l));
+
+    // Add BOUNDAR_SIZE'd padding to the gene sequence, so that each position of the gene gets a prediction
+    int padded_slen = alt.l + CONTEXT_SIZE;
+    char *padded_seq = malloc(padded_slen);
+    if (padded_seq == NULL) {
+        log_fatal("Failed to allocate %d bytes for padded sequence", padded_slen);
+        exit(EXIT_FAILURE);
+    }
+    memset(padded_seq, 'N', BOUNDARY_SIZE); // Prepend with 5000 Ns
+    memcpy(padded_seq + BOUNDARY_SIZE, alt.s, alt.l);
+    memset(padded_seq + (padded_slen - BOUNDARY_SIZE), 'N', BOUNDARY_SIZE); // Append with 5000 Ns
+    free(alt.s);
+
+    if (predict_padded_sequence(models, padded_seq, padded_slen, current_gene->strand, alt_predictions, num_alt_predictions) != EXIT_SUCCESS) {
+        free(padded_seq);
+        return EXIT_FAILURE;
+    }
+    free(padded_seq);
+
+    // Fix predictions order
+    if (alt_len != ref_len) {
+        align_predictions_alt_to_ref(pos_in_gene, current_gene->seq.l, ref_len, alt_len, alt_predictions);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+void write_gene_scores(FILE *output, const GeneReference *gene, const float *alt_predictions) {
+    for (int i = 0; i < gene->seq.l; i++) {
+        const float ref_acceptor = gene->scores[i * NUM_SCORES + ACCEPTOR_POS];
+        const float ref_donor = gene->scores[i * NUM_SCORES + DONOR_POS];
+
+        const float alt_acceptor = alt_predictions[i * NUM_SCORES + ACCEPTOR_POS];
+        const float alt_donor = alt_predictions[i * NUM_SCORES + DONOR_POS];
+
+        if (ref_acceptor < SCORE_THRESHOLD && ref_donor < SCORE_THRESHOLD && alt_acceptor < SCORE_THRESHOLD && alt_donor < SCORE_THRESHOLD) continue;
+
+        fprintf(output, "%li\t%f\t%f\t%f\t%f\n", i + gene->start + 1, ref_acceptor, ref_donor, alt_acceptor, alt_donor);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -134,23 +188,20 @@ int main(int argc, char *argv[]) {
 
     // Load reference from binary file
     Reference ref;
-    Reference_read(args.reference_bin, &ref);
+    if (reference_read(args.reference_bin, &ref) != EXIT_SUCCESS) {
+        log_error("Failed to read reference scores binary: %s", args.reference_bin);
+        return EXIT_FAILURE;
+    }
 
     // Load reference fasta for sequence lookup
     faidx_t *fa_in;
-    if ((fa_in = fai_load(args.fasta)) < 0) return EXIT_FAILURE; // Load reference fasta for sequence lookup
+    if ((fa_in = fai_load(args.fasta)) == NULL) return EXIT_FAILURE; // Load reference fasta for sequence lookup
 
-    FILE *variants_fp = fopen(args.variants, "r");
-    if (variants_fp == NULL) {
-        log_error("Could not open file: %s", args.variants);
-        return EXIT_FAILURE;
-    }
+    FILE *variants_fp = open_file_or_log(args.variants, "r");
+    if (variants_fp == NULL) return EXIT_FAILURE;
 
-    FILE *output = fopen(args.output, "w");
-    if (output == NULL) {
-        log_error("Could not open file: %s", args.output);
-        return EXIT_FAILURE;
-    }
+    FILE *output = open_file_or_log(args.output, "w");
+    if (output == NULL) return EXIT_FAILURE;
 
     // Skip first line
     char buffer[MAX_LINE];
@@ -162,64 +213,20 @@ int main(int argc, char *argv[]) {
     // Loop over VCF variants
     Variant variant;
     GeneReference current_gene;
-    GeneReference_init(&current_gene);
+    gene_reference_init(&current_gene);
 
-    while (Variant_tsv_read_next(variants_fp, &variant) == EXIT_SUCCESS) {
-        // If gene is different from previous variant, we need to load the reference scores for the current gene
-        if (strcmp(variant.gene, current_gene.name) != 0) {
-            GeneReference_update(variant.chr, variant.gene, fa_in, &ref, &current_gene);
+    while (variant_tsv_read_next(variants_fp, &variant) == EXIT_SUCCESS) {
+        float *alt_predictions;
+        int num_alt_predictions;
+        if (process_variant_row(models, fa_in, &ref, &current_gene, &variant, &alt_predictions, &num_alt_predictions) != EXIT_SUCCESS) {
+            continue;
         }
 
         fprintf(output, "#%s_%c_%li_%li:%s_%li_%s_%s\n", variant.gene, current_gene.strand, current_gene.start, current_gene.end, variant.chr, variant.pos+1, variant.ref, variant.alt);
 
-        // Replace ref by alt in gene sequence
-        const int ref_len = strnlen(variant.ref, MAX_FIELD);
-        const int alt_len = strnlen(variant.alt, MAX_FIELD);
-        const uint64_t pos_in_gene = variant.pos - current_gene.start;
-
-        kstring_t alt = { 0 };
-        create_alt_seq(&current_gene.seq, pos_in_gene, ref_len, alt_len, variant.alt, &(alt.s), &(alt.l));
-
-        // Add BOUNDAR_SIZE'd padding to the gene sequence, so that each position of the gene gets a prediction
-        int padded_slen = alt.l + CONTEXT_SIZE;
-        char *padded_seq = malloc(padded_slen);
-        memset(padded_seq, 'N', BOUNDARY_SIZE); // Prepend with 5000 Ns
-        memcpy(padded_seq + BOUNDARY_SIZE, alt.s, alt.l);
-        memset(padded_seq + (padded_slen - BOUNDARY_SIZE), 'N', BOUNDARY_SIZE); // Append with 5000 Ns
-        free(alt.s);
-
-        float *encoding = malloc(padded_slen * ENCODING_SIZE * sizeof(float));
-        memset(encoding, 0, padded_slen * ENCODING_SIZE * sizeof(float));
-        int encoding_len = one_hot_encode(padded_seq, padded_slen, (float *) encoding);
-        free(padded_seq);
-
-        if (current_gene.strand == NEGATIVE_STRAND) reverse_encoding(encoding, encoding_len);
-
-        int num_alt_predictions;
-        float *alt_predictions;
-        predict(models, encoding_len, 1, (float *) encoding, &num_alt_predictions, &alt_predictions);
-        free(encoding);
-
-        if (current_gene.strand == NEGATIVE_STRAND) reverse_prediction(alt_predictions, num_alt_predictions, NUM_SCORES);
-
-        // Fix predictions order
-        if (alt_len != ref_len) {
-            align_predictions_alt_to_ref(pos_in_gene, current_gene.seq.l, ref_len, alt_len, &alt_predictions);
-        }
-
         log_info("%s\t%li\t%li\t%s\t%c\t%i", variant.chr, current_gene.start, current_gene.end, current_gene.name, current_gene.strand, current_gene.end - current_gene.start);
 
-        for (int i = 0; i < current_gene.seq.l; i++) {
-            const float ref_acceptor = current_gene.scores[i * NUM_SCORES + ACCEPTOR_POS];
-            const float ref_donor = current_gene.scores[i * NUM_SCORES + DONOR_POS];
-
-            const float alt_acceptor = alt_predictions[i * NUM_SCORES + ACCEPTOR_POS];
-            const float alt_donor = alt_predictions[i * NUM_SCORES + DONOR_POS];
-
-            if (ref_acceptor < SCORE_THRESHOLD && ref_donor < SCORE_THRESHOLD && alt_acceptor < SCORE_THRESHOLD && alt_donor < SCORE_THRESHOLD) continue;
-
-            fprintf(output, "%li\t%f\t%f\t%f\t%f\n", i + current_gene.start + 1, ref_acceptor, ref_donor, alt_acceptor, alt_donor);
-        }
+        write_gene_scores(output, &current_gene, alt_predictions);
 
         free(alt_predictions);
     }
