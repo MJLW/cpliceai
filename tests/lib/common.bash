@@ -23,6 +23,16 @@ setup() {
     for bin in "$CPLICEAI_REFERENCE_BIN" "$CPLICEAI_PREDICT_VARIANT_BIN" "$CPLICEAI_PREDICT_GENE_BIN"; do
         [ -x "$bin" ] || skip "binary not built: $bin (build the project before running tests)"
     done
+
+    # A per-test scratch dir. Not using bats-core's BATS_TEST_TMPDIR/BATS_FILE_TMPDIR
+    # here: those are only populated by bats-core >= 1.3.0, and setup()/the test
+    # body/teardown() all run in the same process regardless of bats version, so a
+    # plain mktemp works everywhere.
+    TEST_TMPDIR="$(mktemp -d)"
+}
+
+teardown() {
+    [ -n "${TEST_TMPDIR:-}" ] && rm -rf "$TEST_TMPDIR"
 }
 
 # assert_gene_score <tsv> <pos> <expected ref_acceptor> <ref_donor> <alt_acceptor> <alt_donor>

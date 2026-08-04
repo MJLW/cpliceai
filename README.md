@@ -18,5 +18,4 @@ cmake --build build --target check   # equivalent to: cd build && make check
 pipeline test, which loads the real SpliceAI TensorFlow models against a small synthetic fixture
 (`tests/fixtures/`) and takes tens of seconds.
 
-Requires `bats` on `PATH` (installed in `.devcontainer/Dockerfile` — rebuild the devcontainer image
-if `find_program(BATS_EXECUTABLE bats REQUIRED)` fails to find it).
+Requires `bats` on `PATH` (installed in `.devcontainer/Dockerfile`

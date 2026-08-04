@@ -1,30 +1,21 @@
 load 'lib/common'
 
-# Builds the reference scores binary once for the whole file (real TensorFlow
-# inference over the tiny synthetic fixture in tests/fixtures/), then reuses
-# it across every test below - both predict binaries depend on it.
-setup_file() {
-    for bin in "$CPLICEAI_REFERENCE_BIN" "$CPLICEAI_PREDICT_VARIANT_BIN" "$CPLICEAI_PREDICT_GENE_BIN"; do
-        [ -x "$bin" ] || skip "binary not built: $bin (build the project before running tests)"
-    done
+# Each test below builds its own reference.bin in $TEST_TMPDIR (from
+# tests/lib/common.bash's setup()) rather than sharing one built once for the
+# whole file. That costs a couple of extra `cpliceai_reference` runs, but
+# avoids depending on bats-core's setup_file()/BATS_FILE_TMPDIR, which are
+# only available on bats-core >= 1.3.0.
 
-    REFERENCE_BIN="$BATS_FILE_TMPDIR/reference.bin"
-    "$CPLICEAI_REFERENCE_BIN" \
+@test "cpliceai_reference builds a non-empty reference scores binary" {
+    local ref_bin="$TEST_TMPDIR/reference.bin"
+
+    run "$CPLICEAI_REFERENCE_BIN" \
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
         "$FIXTURES_DIR/regions.tsv" \
-        "$REFERENCE_BIN" \
-        >"$BATS_FILE_TMPDIR/reference.log" 2>&1
-    status=$?
-
-    if [ "$status" -ne 0 ] || [ ! -s "$REFERENCE_BIN" ]; then
-        cat "$BATS_FILE_TMPDIR/reference.log" >&2
-        return 1
-    fi
-}
-
-@test "cpliceai_reference builds a non-empty reference scores binary" {
-    [ -s "$BATS_FILE_TMPDIR/reference.bin" ]
+        "$ref_bin"
+    [ "$status" -eq 0 ]
+    [ -s "$ref_bin" ]
 }
 
 @test "cpliceai_reference fails cleanly on a missing regions file" {
@@ -32,16 +23,24 @@ setup_file() {
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
         "$FIXTURES_DIR/does-not-exist.tsv" \
-        "$BATS_TEST_TMPDIR/unused.bin"
+        "$TEST_TMPDIR/unused.bin"
     [ "$status" -ne 0 ]
 }
 
 @test "cpliceai_predict_variant annotates a VCF with SpliceAI scores" {
-    local output_vcf="$BATS_TEST_TMPDIR/annotated.vcf"
+    local ref_bin="$TEST_TMPDIR/reference.bin"
+    local output_vcf="$TEST_TMPDIR/annotated.vcf"
+
+    run "$CPLICEAI_REFERENCE_BIN" \
+        "$MODEL_DIR" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.tsv" \
+        "$ref_bin"
+    [ "$status" -eq 0 ]
 
     run "$CPLICEAI_PREDICT_VARIANT_BIN" \
         "$FIXTURES_DIR/variants.vcf" \
-        "$BATS_FILE_TMPDIR/reference.bin" \
+        "$ref_bin" \
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
         "$FIXTURES_DIR/regions.tsv" \
@@ -63,11 +62,19 @@ setup_file() {
 }
 
 @test "cpliceai_predict_gene reports per-position splice scores for the variant" {
-    local output_tsv="$BATS_TEST_TMPDIR/scores.tsv"
+    local ref_bin="$TEST_TMPDIR/reference.bin"
+    local output_tsv="$TEST_TMPDIR/scores.tsv"
+
+    run "$CPLICEAI_REFERENCE_BIN" \
+        "$MODEL_DIR" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.tsv" \
+        "$ref_bin"
+    [ "$status" -eq 0 ]
 
     run "$CPLICEAI_PREDICT_GENE_BIN" \
         "$FIXTURES_DIR/variants.tsv" \
-        "$BATS_FILE_TMPDIR/reference.bin" \
+        "$ref_bin" \
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
         "$output_tsv"
