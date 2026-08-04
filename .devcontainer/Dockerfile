@@ -12,6 +12,10 @@ ARG HTSLIB_VERSION=1.24
 # 2.18.1 (2.19+ only ships inside the much larger Python pip wheel), so
 # this is the newest version available as a standalone C API archive.
 ARG TENSORFLOW_VERSION=2.18.1
+# bats-core runs the end-to-end test suite under tests/ (see CMakeLists.txt's
+# `check` target). Installed from its release tarball rather than apt, for
+# the same reproducibility reason as htslib/TensorFlow above.
+ARG BATS_CORE_VERSION=1.14.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
@@ -56,6 +60,13 @@ RUN curl -fsSL "https://storage.googleapis.com/tensorflow/versions/${TENSORFLOW_
 # Register /usr/local/lib with the dynamic linker so libtensorflow.so and
 # libhts.so are found at runtime without exporting LD_LIBRARY_PATH by hand.
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
+
+# bats-core (pure bash + a small C helper), for `make check` / ctest.
+RUN curl -fsSL "https://github.com/bats-core/bats-core/archive/refs/tags/v${BATS_CORE_VERSION}.tar.gz" \
+        -o /tmp/bats-core.tar.gz \
+    && tar -xzf /tmp/bats-core.tar.gz -C /tmp \
+    && bash "/tmp/bats-core-${BATS_CORE_VERSION}/install.sh" /usr/local \
+    && rm -rf /tmp/bats-core.tar.gz "/tmp/bats-core-${BATS_CORE_VERSION}"
 
 # pkg-config on some distros doesn't search /usr/local by default.
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"

@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 project(CpliceAI C)
 
+enable_testing()
+
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_FLAGS_DEBUG_INIT "-Wall -g")
 set(CMAKE_C_FLAGS_RELEASE_INIT "-O3")
@@ -51,6 +53,40 @@ target_link_libraries(cpliceai_predict_gene PRIVATE
 foreach(cpliceai_target cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
     add_sanitizers(${cpliceai_target})
 endforeach()
+
+# End-to-end tests (bats-core), wired into CTest and `make check`
+find_program(BATS_EXECUTABLE bats REQUIRED)
+
+set(CPLICEAI_TEST_ENVIRONMENT
+    "CPLICEAI_REFERENCE_BIN=$<TARGET_FILE:cpliceai_reference>"
+    "CPLICEAI_PREDICT_VARIANT_BIN=$<TARGET_FILE:cpliceai_predict_variant>"
+    "CPLICEAI_PREDICT_GENE_BIN=$<TARGET_FILE:cpliceai_predict_gene>"
+    "MODEL_DIR=${CMAKE_SOURCE_DIR}/models"
+    "FIXTURES_DIR=${CMAKE_SOURCE_DIR}/tests/fixtures")
+
+# Fast tests: argument parsing only, binaries exit before loading TF models.
+foreach(cli_test reference predict_variant predict_gene)
+    set(test_name "cli_${cli_test}")
+    add_test(NAME ${test_name}
+        COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/cli/${cli_test}.bats)
+    set_tests_properties(${test_name} PROPERTIES
+        ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+        LABELS "cli"
+        TIMEOUT 60)
+endforeach()
+
+# Slow test: runs real TensorFlow inference (model loading x3 invocations)
+# over a tiny synthetic fixture, end to end across all three binaries.
+add_test(NAME e2e_pipeline
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/pipeline.bats)
+set_tests_properties(e2e_pipeline PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 300)
+
+add_custom_target(check
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
 
 # Shared library
 add_library(libcpliceai SHARED
