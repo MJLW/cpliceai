@@ -120,8 +120,6 @@ int process_gene_region(Model *models, faidx_t *fa, const Gene *gene, Reference 
 
 int main(int argc, char *argv[]) {
     setenv("TF_CPP_MIN_LOG_LEVEL", "2", 1);
-    setenv("NVIDIA_TF32_OVERRIDE", "1", 1);
-    setenv("TF_CUDNN_USE_AUTOTUNE", "0", 1);
 
     args_t args = make_default_args();
     if (!parse_args(argc, argv, &args) || args.help) {

@@ -3,16 +3,21 @@
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
+      "VARIANT": "gpu",
       "USERNAME": "dev",
       "USER_UID": "1000",
       "USER_GID": "1000"
     }
   },
+  "runArgs": [
+    "--gpus=all"
+  ],
+  "hostRequirements": {
+    "gpu": "optional
+  },
   "remoteUser": "dev",
   "updateRemoteUserUID": true,
-  "containerEnv": {
-
-  },
+  "containerEnv": { },
   "mounts": [
     "source=/media/data/reference_files,target=/workspaces/reference_files,type=bind,consistency=cached"
   ],

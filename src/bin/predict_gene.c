@@ -173,8 +173,6 @@ void write_gene_scores(FILE *output, const GeneReference *gene, const float *alt
 
 int main(int argc, char *argv[]) {
     setenv("TF_CPP_MIN_LOG_LEVEL", "2", 1);
-    setenv("NVIDIA_TF32_OVERRIDE", "1", 1);
-    setenv("TF_CUDNN_USE_AUTOTUNE", "0", 1);
 
     // Parse arguments
     args_t args = make_default_args();

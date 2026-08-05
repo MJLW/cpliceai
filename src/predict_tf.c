@@ -3,9 +3,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <tensorflow/c/c_api.h>
+#include <tensorflow/c/tf_buffer.h>
+#include <tensorflow/c/tf_datatype.h>
+#include <tensorflow/c/tf_status.h>
+#include <tensorflow/c/tf_tensor.h>
+
 #include "predict.h"
 #include "logging/log.h"
 #include "utils.h"
+
+#define SPLICEAI_TAGS "serve"
+
+struct Model {
+    TF_Status *status;
+    TF_Graph *graph;
+    TF_SessionOptions *sess_opts;
+    TF_Buffer *run_opts;
+    TF_Session *session;
+};
 
 void deallocator(void *data, size_t a, void *b) {
     free(data);
@@ -14,7 +30,7 @@ void deallocator(void *data, size_t a, void *b) {
 void noop_deallocator(void *data, size_t a, void *b) {}
 
 // Check the status and print an error message if any
-int check_status(TF_Status *status, const char *msg) {
+static int check_status(TF_Status *status, const char *msg) {
     if (TF_GetCode(status) != TF_OK) {
         fprintf(stderr, "Error: %s: %s\n", msg, TF_Message(status));
         return EXIT_FAILURE;
@@ -75,10 +91,6 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
         return EXIT_FAILURE;
     }
 
-    // int chunk_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
-    // float *chunked_outputs[num_data];
-    // for (int i = 0; i < num_data; i++) chunked_outputs[i] = out + i * chunk_len;
-
     int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
     float *outputs = calloc(output_len, sizeof(float));
 
@@ -111,7 +123,6 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
                       NULL, 0, // Target operations, target operations count
                       NULL, // Run metadata
                       model.status);
-        // check_status(model.status, "Running model");
         if (TF_GetCode(model.status) != TF_OK) {
             log_error("Error running the model: %s", TF_Message(model.status));
             return EXIT_FAILURE;
@@ -134,24 +145,3 @@ int predict(Model *models, int data_size, int num_data, float *data, int *num_ou
 
     return EXIT_SUCCESS;
 }
-
-int predict_padded_sequence(Model *models, const char *seq, int seq_len, char strand, float **predictions, int *num_predictions) {
-    float *encoding = malloc(seq_len * ENCODING_SIZE * sizeof(float));
-    if (encoding == NULL) {
-        log_fatal("Failed to allocate %zu bytes for sequence encoding", seq_len * ENCODING_SIZE * sizeof(float));
-        exit(EXIT_FAILURE);
-    }
-    memset(encoding, 0, seq_len * ENCODING_SIZE * sizeof(float));
-    int encoding_len = one_hot_encode(seq, seq_len, encoding);
-
-    if (strand == '-') reverse_encoding(encoding, encoding_len);
-
-    int ret = predict(models, encoding_len, 1, encoding, num_predictions, predictions);
-    free(encoding);
-    if (ret != EXIT_SUCCESS) return ret;
-
-    if (strand == '-') reverse_prediction(*predictions, *num_predictions, NUM_SCORES);
-
-    return EXIT_SUCCESS;
-}
-

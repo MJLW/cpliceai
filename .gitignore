@@ -1,5 +1,7 @@
 build/*
+build-*/
 data/*
 .cache
+benchmarks/*
 
 *.bin
