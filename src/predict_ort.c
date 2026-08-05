@@ -17,6 +17,7 @@ struct Model {
     OrtSession *session[NUM_SPLICEAI_MODELS];
     char *input_name[NUM_SPLICEAI_MODELS];
     char *output_name[NUM_SPLICEAI_MODELS];
+    int max_chunk_len;
 };
 
 typedef enum { ORT_EP_AUTO, ORT_EP_CUDA, ORT_EP_CPU } OrtEpMode;
@@ -44,6 +45,21 @@ static OrtLoggingLevel get_log_severity(void) {
     if (level < ORT_LOGGING_LEVEL_VERBOSE) level = ORT_LOGGING_LEVEL_VERBOSE;
     if (level > ORT_LOGGING_LEVEL_FATAL) level = ORT_LOGGING_LEVEL_FATAL;
     return (OrtLoggingLevel) level;
+}
+
+// Default of 250000 is the largest input length confirmed to run reliably on the CUDA execution
+// provider without exhausting GPU memory on real hardware; sequences longer than this are split
+// into overlapping windows by predict() (see run_models_sum() / the chunking branch below).
+#define DEFAULT_MAX_CHUNK_LEN 250000
+
+static int get_max_chunk_len(void) {
+    const char *v = getenv("CPLICEAI_ORT_MAX_CHUNK_LEN");
+    int len = (v && v[0] != '\0') ? atoi(v) : DEFAULT_MAX_CHUNK_LEN;
+    if (len <= CONTEXT_SIZE) {
+        log_fatal("CPLICEAI_ORT_MAX_CHUNK_LEN=%d must be greater than CONTEXT_SIZE (%d)", len, CONTEXT_SIZE);
+        exit(EXIT_FAILURE);
+    }
+    return len;
 }
 
 // Logs status at WARN (not ERROR) and releases it. Used for the CUDA-availability probe below,
@@ -187,6 +203,7 @@ Model *load_models(const char *models_dir) {
 
     OrtEpMode ep_mode = get_ep_mode();
     int cuda_engaged = 0;
+    m->max_chunk_len = get_max_chunk_len();
 
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
         kstring_t model_path = {0};
@@ -235,8 +252,133 @@ void destroy_models(Model *m) {
     free(m);
 }
 
+// Runs all NUM_SPLICEAI_MODELS models over a single [1, window_seq_len, 4] input window and
+// accumulates (sums, does not average) their outputs into dest_sum[0 .. (window_seq_len -
+// CONTEXT_SIZE) * NUM_SCORES). dest_sum must be pre-zeroed by the caller -- predict() calls this
+// once per chunk when chunking, so each chunk's contribution simply adds into its own slice of
+// the shared output buffer.
+static int run_models_sum(Model *m, float *window_data, int window_seq_len, float *dest_sum) {
+    int64_t input_dims[] = {1, window_seq_len, 4};
+
+    OrtValue *input_tensor = NULL;
+    if (ort_check(m->api, m->api->CreateTensorWithDataAsOrtValue(
+            m->mem_info, window_data, (size_t) window_seq_len * ENCODING_SIZE * sizeof(float),
+            input_dims, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor),
+            "CreateTensorWithDataAsOrtValue") != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    const OrtValue *inputs[] = {input_tensor};
+
+    int window_output_len = (window_seq_len - CONTEXT_SIZE) * NUM_SCORES;
+
+    for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
+        const char *input_names[] = {m->input_name[i]};
+        const char *output_names[] = {m->output_name[i]};
+        OrtValue *output_tensor = NULL;
+
+        if (ort_check(m->api, m->api->Run(m->session[i], NULL, input_names, inputs, 1, output_names, 1, &output_tensor), "Run") != EXIT_SUCCESS) {
+            m->api->ReleaseValue(input_tensor);
+            return EXIT_FAILURE;
+        }
+
+        OrtTensorTypeAndShapeInfo *shape_info = NULL;
+        int shape_ok = ort_check(m->api, m->api->GetTensorTypeAndShape(output_tensor, &shape_info), "GetTensorTypeAndShape") == EXIT_SUCCESS;
+        size_t elem_count = 0;
+        if (shape_ok) {
+            shape_ok = ort_check(m->api, m->api->GetTensorShapeElementCount(shape_info, &elem_count), "GetTensorShapeElementCount") == EXIT_SUCCESS;
+            m->api->ReleaseTensorTypeAndShapeInfo(shape_info);
+        }
+        if (!shape_ok || (int) elem_count != window_output_len) {
+            log_error("Model %d: unexpected output element count %zu, expected %d", i + 1, elem_count, window_output_len);
+            m->api->ReleaseValue(output_tensor);
+            m->api->ReleaseValue(input_tensor);
+            return EXIT_FAILURE;
+        }
+
+        float *output_data = NULL;
+        if (ort_check(m->api, m->api->GetTensorMutableData(output_tensor, (void **) &output_data), "GetTensorMutableData") != EXIT_SUCCESS) {
+            m->api->ReleaseValue(output_tensor);
+            m->api->ReleaseValue(input_tensor);
+            return EXIT_FAILURE;
+        }
+        for (int j = 0; j < window_output_len; j++) {
+            dest_sum[j] += output_data[j];
+        }
+
+        m->api->ReleaseValue(output_tensor);
+    }
+    m->api->ReleaseValue(input_tensor);
+
+    return EXIT_SUCCESS;
+}
+
+// Splits a single (num_data == 1) sequence longer than m->max_chunk_len into overlapping windows
+// and stitches the results back together. Safe because the model's receptive field is bounded by
+// CONTEXT_SIZE/BOUNDARY_SIZE (fully convolutional, no cross-position state) -- each output base is
+// produced by exactly one window, using real flanking sequence already present in `data` (the
+// caller pads only the true ends of the sequence; internal window boundaries see actual bases).
+static int predict_chunked(Model *m, int seq_len, float *data, int *num_out, float *out[]) {
+    int gene_len = seq_len - CONTEXT_SIZE;
+    int output_len = gene_len * NUM_SCORES;
+    int chunk_gene_len = m->max_chunk_len - CONTEXT_SIZE;
+
+    float *outputs = calloc(output_len, sizeof(float));
+    if (outputs == NULL) {
+        log_fatal("Failed to allocate %zu bytes for outputs", (size_t) output_len * sizeof(float));
+        exit(EXIT_FAILURE);
+    }
+
+    for (int start = 0; start < gene_len; start += chunk_gene_len) {
+        int len = chunk_gene_len < (gene_len - start) ? chunk_gene_len : (gene_len - start);
+        float *window_data = data + (size_t) start * ENCODING_SIZE;
+        float *dest = outputs + (size_t) start * NUM_SCORES;
+
+        if (run_models_sum(m, window_data, len + CONTEXT_SIZE, dest) != EXIT_SUCCESS) {
+            free(outputs);
+            return EXIT_FAILURE;
+        }
+    }
+
+    for (int i = 0; i < output_len; i++) outputs[i] /= NUM_SPLICEAI_MODELS;
+
+    *num_out = output_len;
+    *out = outputs;
+
+    return EXIT_SUCCESS;
+}
+
 int predict(Model *m, int data_size, int num_data, float *data, int *num_out, float *out[]) {
-    int64_t input_dims[] = {num_data, data_size / ENCODING_SIZE, 4};
+    int seq_len = data_size / ENCODING_SIZE;
+
+    if (num_data == 1 && seq_len > m->max_chunk_len) {
+        return predict_chunked(m, seq_len, data, num_out, out);
+    }
+
+    if (num_data == 1) {
+        int output_len = (seq_len - CONTEXT_SIZE) * NUM_SCORES;
+        float *outputs = calloc(output_len, sizeof(float));
+        if (outputs == NULL) {
+            log_fatal("Failed to allocate %zu bytes for outputs", (size_t) output_len * sizeof(float));
+            exit(EXIT_FAILURE);
+        }
+
+        if (run_models_sum(m, data, seq_len, outputs) != EXIT_SUCCESS) {
+            free(outputs);
+            return EXIT_FAILURE;
+        }
+
+        for (int i = 0; i < output_len; i++) outputs[i] /= NUM_SPLICEAI_MODELS;
+
+        *num_out = output_len;
+        *out = outputs;
+
+        return EXIT_SUCCESS;
+    }
+
+    // num_data != 1 is never exercised by any current call site (every caller predicts one
+    // sequence at a time), kept as-is rather than folding into run_models_sum's batch-of-1
+    // assumption.
+    int64_t input_dims[] = {num_data, seq_len, 4};
 
     OrtValue *input_tensor = NULL;
     if (ort_check(m->api, m->api->CreateTensorWithDataAsOrtValue(
@@ -247,7 +389,7 @@ int predict(Model *m, int data_size, int num_data, float *data, int *num_out, fl
     }
     const OrtValue *inputs[] = {input_tensor};
 
-    int output_len = ((data_size / ENCODING_SIZE) - CONTEXT_SIZE) * NUM_SCORES;
+    int output_len = (seq_len - CONTEXT_SIZE) * NUM_SCORES;
     float *outputs = calloc(output_len, sizeof(float));
     if (outputs == NULL) {
         log_fatal("Failed to allocate %zu bytes for outputs", (size_t) output_len * sizeof(float));

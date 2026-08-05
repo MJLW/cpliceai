@@ -151,6 +151,17 @@ set_tests_properties(e2e_pipeline PROPERTIES
     LABELS "e2e"
     TIMEOUT 300)
 
+# Chunking is only implemented in the onnxruntime backend's predict_ort.c (the tensorflow
+# backend never hit the GPU OOM this mitigates), so only register this test for that backend.
+if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
+    add_test(NAME chunking_parity
+        COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/chunking_parity.bats)
+    set_tests_properties(chunking_parity PROPERTIES
+        ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+        LABELS "e2e"
+        TIMEOUT 300)
+endif()
+
 # Compares the onnxruntime and tensorflow backends against each other at full precision.
 # A single build tree only has one backend's binaries, so this can't be auto-wired the way
 # the tests above are -- it self-skips unless the CPLICEAI_ORT_*/CPLICEAI_TF_* env vars

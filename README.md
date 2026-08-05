@@ -20,6 +20,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 | `CPLICEAI_ORT_CUDNN_CONV_ALGO_SEARCH` | `HEURISTIC` | cuDNN conv algorithm search strategy. Deliberately not ORT's own default `EXHAUSTIVE`: every inference call here uses a different sequence length (no batching), so exhaustive per-shape autotuning would re-benchmark every convolution layer on every single call |
 | `CPLICEAI_ORT_INTRA_OP_THREADS` | ORT default | CPU-EP thread count. Setting this to exactly `1` also pins inter-op threads to 1 and forces sequential execution mode, for fully reproducible output (used by the test suite) |
 | `CPLICEAI_ORT_LOG_SEVERITY` | `2` (warning) | `0`=verbose, prints per-node execution-provider placement -- useful for confirming a node didn't silently fall back to CPU |
+| `CPLICEAI_ORT_MAX_CHUNK_LEN` | `250000` | Max sequence length (bases) fed to `Run()` in one call. Longer inputs (large genes) are split into overlapping windows and stitched back together -- safe because the model's receptive field is bounded by `CONTEXT_SIZE`/`BOUNDARY_SIZE`. The default is the largest length confirmed to run reliably on the CUDA execution provider without exhausting GPU memory; lower it on GPUs with less VRAM |
 
 ### Building for GPU
 
