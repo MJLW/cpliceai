@@ -21,6 +21,18 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 | `CPLICEAI_ORT_INTRA_OP_THREADS` | ORT default | CPU-EP thread count. Setting this to exactly `1` also pins inter-op threads to 1 and forces sequential execution mode, for fully reproducible output (used by the test suite) |
 | `CPLICEAI_ORT_LOG_SEVERITY` | `2` (warning) | `0`=verbose, prints per-node execution-provider placement -- useful for confirming a node didn't silently fall back to CPU |
 | `CPLICEAI_ORT_MAX_CHUNK_LEN` | `250000` | Max sequence length (bases) fed to `Run()` in one call. Longer inputs (large genes) are split into overlapping windows and stitched back together -- safe because the model's receptive field is bounded by `CONTEXT_SIZE`/`BOUNDARY_SIZE`. The default is the largest length confirmed to run reliably on the CUDA execution provider without exhausting GPU memory; lower it on GPUs with less VRAM |
+| `CPLICEAI_ORT_PROFILE` | unset | Path prefix; enables ORT's per-node profiler and writes one JSON per ensemble member (`<prefix>_model<N>_<timestamp>.json`). Summarise with `scripts/profile_summary.sh` |
+
+#### GPU performance A/B knobs (CUDA EP)
+
+Forwarded to ORT only when set, so leaving them unset keeps ONNX Runtime's own defaults. Added
+for the investigation in `docs/gpu-validation.md`; none has a proven-best value for this model yet.
+
+| Variable | ORT provider option | Purpose |
+|---|---|---|
+| `CPLICEAI_ORT_PREFER_NHWC` | `prefer_nhwc` | `1` makes the CUDA EP prefer NHWC kernels, applying layout transforms automatically. NVIDIA tensor cores favour NHWC, but ORT warns this can *add* transposes where NHWC operator coverage is incomplete -- measure, don't assume. Requires ORT >= 1.20 |
+| `CPLICEAI_ORT_USE_TF32` | `use_tf32` | `0` disables TF32, dropping convolutions to true fp32 FMA math. Useful as a probe for whether tensor cores are engaged at all at this model's 32-channel width |
+| `CPLICEAI_ORT_CONV1D_PAD_NC1D` | `cudnn_conv1d_pad_to_nc1d` | Controls how 1D convolutions are mapped onto cuDNN. Every conv in this model is 1D, so it is plausibly relevant |
 
 ### Building for GPU
 

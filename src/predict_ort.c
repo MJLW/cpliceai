@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <klib/kstring.h>
 #include <onnxruntime_c_api.h>
@@ -18,9 +19,27 @@ struct Model {
     char *input_name[NUM_SPLICEAI_MODELS];
     char *output_name[NUM_SPLICEAI_MODELS];
     int max_chunk_len;
+    int profiling;
 };
 
 typedef enum { ORT_EP_AUTO, ORT_EP_CUDA, ORT_EP_CPU } OrtEpMode;
+
+// Wall-clock accounting for CPLICEAI_ORT_TIMING. Deliberately *not* ORT's own profiler: that
+// timestamps every node individually, which on CUDA forces a synchronization per node and inflates
+// the very thing it is trying to measure. Two clock_gettime() calls per Run() (vDSO, ~20ns) are
+// negligible against millisecond-scale inference, so these are always collected and only reported
+// when the env var is set. g_work_start is taken at the *end* of load_models(), so the denominator
+// is inference work rather than process startup and model loading.
+static double g_run_seconds = 0.0;
+static long g_run_calls = 0;
+static double g_work_start = 0.0;
+static int g_timing = 0;
+
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double) ts.tv_sec + (double) ts.tv_nsec / 1e9;
+}
 
 // Logs and releases an OrtStatus*. Returns EXIT_SUCCESS if status was NULL (no error).
 static int ort_check(const OrtApi *api, OrtStatus *status, const char *what) {
@@ -73,6 +92,39 @@ static int ort_probe(const OrtApi *api, OrtStatus *status, const char *what) {
     return EXIT_FAILURE;
 }
 
+// Optional CUDA provider options, plumbed as env vars purely so the GPU-performance A/B matrix in
+// docs/gpu-validation.md can be run without rebuilding. Each is forwarded to ORT *only* when its
+// env var is set to a non-empty value, so leaving them unset keeps ORT's own defaults rather than
+// pinning a possibly-wrong choice here. Values are passed through verbatim (ORT validates them and
+// rejects unknown keys/values, confirmed against this build).
+static const struct {
+    const char *env;
+    const char *key;
+} CUDA_OPT_ENV[] = {
+    // Makes the CUDA EP prefer NHWC kernels, applying layout transformations automatically.
+    // NVIDIA tensor cores want NHWC, and this model is NCHW throughout with 39 Convs against ~57
+    // residual Transposes -- but ORT's own docs warn this can also *add* transposes when operator
+    // coverage is incomplete, so it's a measurement, not an assumed win. Requires ORT >= 1.20.
+    {"CPLICEAI_ORT_PREFER_NHWC", "prefer_nhwc"},
+    // TF32 is on by default in ORT. Toggling it off drops convolutions to true fp32 FMA math --
+    // a useful probe for whether tensor cores are engaged at all at this model's 32-channel width.
+    {"CPLICEAI_ORT_USE_TF32", "use_tf32"},
+    // Every conv in this model is 1D; this controls how those get mapped onto cuDNN.
+    {"CPLICEAI_ORT_CONV1D_PAD_NC1D", "cudnn_conv1d_pad_to_nc1d"},
+};
+#define NUM_CUDA_OPT_ENV (sizeof(CUDA_OPT_ENV) / sizeof(CUDA_OPT_ENV[0]))
+
+// Logs which optional CUDA provider options are in play. Called once from load_models() rather
+// than from append_cuda_ep(), which runs per session and would repeat itself NUM_SPLICEAI_MODELS
+// times.
+static void log_cuda_opt_overrides(void) {
+    for (size_t i = 0; i < NUM_CUDA_OPT_ENV; i++) {
+        const char *v = getenv(CUDA_OPT_ENV[i].env);
+        if (v == NULL || v[0] == '\0') continue;
+        log_info("CUDA provider option %s=%s (from %s)", CUDA_OPT_ENV[i].key, v, CUDA_OPT_ENV[i].env);
+    }
+}
+
 // Appends the CUDA execution provider via the V2 provider-options API. These entry points are
 // OrtApi struct members present in every ORT build (CPU or GPU) -- unlike the older
 // OrtSessionOptionsAppendExecutionProvider_CUDA() free-function symbol, which only exists in GPU
@@ -94,13 +146,31 @@ static int append_cuda_ep(const OrtApi *api, OrtSessionOptions *session_options)
     const char *algo_search = getenv("CPLICEAI_ORT_CUDNN_CONV_ALGO_SEARCH");
     if (algo_search == NULL || algo_search[0] == '\0') algo_search = "HEURISTIC";
 
+    // kSameAsRequested (not ORT's kNextPowerOfTwo default) was chosen to limit memory blowup from
+    // widely varying per-call shapes. Overridable so the trade-off can be re-measured: with
+    // sequence chunking now bounding peak allocation, power-of-two blocks may be reusable across
+    // calls instead of forcing a fresh allocation for every new gene length.
+    const char *arena_strategy = getenv("CPLICEAI_ORT_ARENA_EXTEND_STRATEGY");
+    if (arena_strategy == NULL || arena_strategy[0] == '\0') arena_strategy = "kSameAsRequested";
+
     // HEURISTIC (not ORT's default EXHAUSTIVE) is deliberate: every call site here feeds a
     // different sequence length with no batching, so exhaustive per-shape cuDNN autotuning would
     // re-benchmark every convolution layer on every single call.
-    const char *keys[] = {"device_id", "cudnn_conv_algo_search", "arena_extend_strategy"};
-    const char *values[] = {device_id_str, algo_search, "kSameAsRequested"};
+    const char *keys[3 + NUM_CUDA_OPT_ENV];
+    const char *values[3 + NUM_CUDA_OPT_ENV];
+    size_t n = 0;
+    keys[n] = "device_id";              values[n++] = device_id_str;
+    keys[n] = "cudnn_conv_algo_search"; values[n++] = algo_search;
+    keys[n] = "arena_extend_strategy";  values[n++] = arena_strategy;
 
-    if (ort_probe(api, api->UpdateCUDAProviderOptions(cuda_options, keys, values, 3), "CUDA execution provider unavailable") != EXIT_SUCCESS) {
+    for (size_t i = 0; i < NUM_CUDA_OPT_ENV; i++) {
+        const char *v = getenv(CUDA_OPT_ENV[i].env);
+        if (v == NULL || v[0] == '\0') continue;
+        keys[n] = CUDA_OPT_ENV[i].key;
+        values[n++] = v;
+    }
+
+    if (ort_probe(api, api->UpdateCUDAProviderOptions(cuda_options, keys, values, n), "CUDA execution provider unavailable") != EXIT_SUCCESS) {
         api->ReleaseCUDAProviderOptions(cuda_options);
         return EXIT_FAILURE;
     }
@@ -140,6 +210,17 @@ static int configure_session_options(const OrtApi *api, OrtSessionOptions *so, O
             if (ort_check(api, api->SetSessionExecutionMode(so, ORT_SEQUENTIAL), "SetSessionExecutionMode") != EXIT_SUCCESS) {
                 return EXIT_FAILURE;
             }
+        }
+    }
+
+    // ORT's memory-pattern planner precomputes a tensor reuse plan, but only pays off when input
+    // shapes repeat between runs -- ORT's docs scope it to "the same input shapes for each run".
+    // Every gene here is a different length, so the plan is recomputed per call and may cost more
+    // than it saves. Off by default (i.e. ORT's default, enabled); set to 1 to disable it.
+    const char *no_mem_pattern = getenv("CPLICEAI_ORT_DISABLE_MEM_PATTERN");
+    if (no_mem_pattern != NULL && no_mem_pattern[0] != '\0' && no_mem_pattern[0] != '0') {
+        if (ort_check(api, api->DisableMemPattern(so), "DisableMemPattern") != EXIT_SUCCESS) {
+            return EXIT_FAILURE;
         }
     }
 
@@ -205,6 +286,15 @@ Model *load_models(const char *models_dir) {
     int cuda_engaged = 0;
     m->max_chunk_len = get_max_chunk_len();
 
+    // CPLICEAI_ORT_PROFILE=<path prefix> turns on ORT's built-in per-node profiler. Each session
+    // gets its own file (one per ensemble member, otherwise they'd collide); the JSON records a
+    // duration and the selected kernel name for every node, which is what distinguishes "GPU time
+    // is dominated by X" from "wall clock is not GPU time at all". Written on destroy_models().
+    const char *profile_prefix = getenv("CPLICEAI_ORT_PROFILE");
+    m->profiling = (profile_prefix != NULL && profile_prefix[0] != '\0');
+
+    if (ep_mode != ORT_EP_CPU) log_cuda_opt_overrides();
+
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
         kstring_t model_path = {0};
         kputs(models_dir, &model_path);
@@ -219,6 +309,16 @@ Model *load_models(const char *models_dir) {
         }
         if (configure_session_options(m->api, so, ep_mode, &cuda_engaged) != EXIT_SUCCESS) {
             exit(EXIT_FAILURE);
+        }
+
+        if (m->profiling) {
+            kstring_t profile_path = {0};
+            kputs(profile_prefix, &profile_path);
+            kputs("_model", &profile_path);
+            kputl(i + 1, &profile_path);
+            int prof_ok = ort_check(m->api, m->api->EnableProfiling(so, profile_path.s), "EnableProfiling");
+            free(profile_path.s);
+            if (prof_ok != EXIT_SUCCESS) exit(EXIT_FAILURE);
         }
 
         if (ort_check(m->api, m->api->CreateSession(m->env, model_path.s, so, &m->session[i]), "CreateSession") != EXIT_SUCCESS) {
@@ -238,11 +338,32 @@ Model *load_models(const char *models_dir) {
 
     log_active_providers(m->api, cuda_engaged);
 
+    g_timing = getenv("CPLICEAI_ORT_TIMING") != NULL && getenv("CPLICEAI_ORT_TIMING")[0] != '\0';
+    g_work_start = now_seconds();
+
     return m;
 }
 
 void destroy_models(Model *m) {
+    if (g_timing) {
+        double elapsed = now_seconds() - g_work_start;
+        log_info("Timing: %.3fs in Run() across %ld calls (%.2f ms/call) | %.3fs since models loaded | %.1f%% in Run()",
+                 g_run_seconds, g_run_calls,
+                 g_run_calls ? 1000.0 * g_run_seconds / (double) g_run_calls : 0.0,
+                 elapsed, elapsed > 0 ? 100.0 * g_run_seconds / elapsed : 0.0);
+    }
+
     for (int i = 0; i < NUM_SPLICEAI_MODELS; i++) {
+        // Must happen before ReleaseSession: this is what flushes the profile to disk and hands
+        // back the filename ORT actually used (it appends its own timestamp to the prefix).
+        if (m->profiling && m->session[i]) {
+            char *profile_file = NULL;
+            if (ort_check(m->api, m->api->SessionEndProfiling(m->session[i], m->allocator, &profile_file), "SessionEndProfiling") == EXIT_SUCCESS
+                && profile_file != NULL) {
+                log_info("Wrote ONNX Runtime profile: %s", profile_file);
+                ort_check(m->api, m->api->AllocatorFree(m->allocator, profile_file), "AllocatorFree");
+            }
+        }
         if (m->input_name[i]) ort_check(m->api, m->api->AllocatorFree(m->allocator, m->input_name[i]), "AllocatorFree");
         if (m->output_name[i]) ort_check(m->api, m->api->AllocatorFree(m->allocator, m->output_name[i]), "AllocatorFree");
         if (m->session[i]) m->api->ReleaseSession(m->session[i]);
@@ -276,7 +397,11 @@ static int run_models_sum(Model *m, float *window_data, int window_seq_len, floa
         const char *output_names[] = {m->output_name[i]};
         OrtValue *output_tensor = NULL;
 
-        if (ort_check(m->api, m->api->Run(m->session[i], NULL, input_names, inputs, 1, output_names, 1, &output_tensor), "Run") != EXIT_SUCCESS) {
+        double run_t0 = now_seconds();
+        OrtStatus *run_status = m->api->Run(m->session[i], NULL, input_names, inputs, 1, output_names, 1, &output_tensor);
+        g_run_seconds += now_seconds() - run_t0;
+        g_run_calls++;
+        if (ort_check(m->api, run_status, "Run") != EXIT_SUCCESS) {
             m->api->ReleaseValue(input_tensor);
             return EXIT_FAILURE;
         }
