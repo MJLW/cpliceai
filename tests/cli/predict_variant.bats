@@ -17,3 +17,18 @@ load '../lib/common'
     [ "$status" -eq 1 ]
     [[ "$output" == *"USAGE:"* ]]
 }
+
+# The model_dir here is deliberately bogus: reaching the "input format" message proves the
+# value is validated before load_models, which otherwise costs seconds.
+@test "cpliceai_predict_variant rejects an unknown --input-format value before loading models" {
+    run "$CPLICEAI_PREDICT_VARIANT_BIN" \
+        "$FIXTURES_DIR/variants.vcf" \
+        "does-not-exist.bin" \
+        "/nonexistent-model-dir" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.tsv" \
+        "$TEST_TMPDIR/unused.vcf" \
+        --input-format xml
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"input format"* ]]
+}

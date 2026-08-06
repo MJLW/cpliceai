@@ -45,9 +45,9 @@ teardown() {
     run "$CPLICEAI_TF_REFERENCE_BIN" "$CPLICEAI_TF_MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$tf_ref"
     [ "$status" -eq 0 ]
 
-    run "$CPLICEAI_ORT_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ort_ref" "$CPLICEAI_ORT_MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$ort_tsv"
+    run "$CPLICEAI_ORT_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ort_ref" "$CPLICEAI_ORT_MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$ort_tsv"
     [ "$status" -eq 0 ]
-    run "$CPLICEAI_TF_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$tf_ref" "$CPLICEAI_TF_MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$tf_tsv"
+    run "$CPLICEAI_TF_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$tf_ref" "$CPLICEAI_TF_MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$tf_tsv"
     [ "$status" -eq 0 ]
 
     # reference.bin is a sensitive canary for numerical drift: build_reference_scores.c only

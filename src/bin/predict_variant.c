@@ -1,16 +1,13 @@
-#include <htslib/kstring.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <klib/kstring.h>
-#include <klib/kvec.h>
-
-#include <htslib/hts.h>
-#include <htslib/vcf.h>
 #include <htslib/faidx.h>
-#include <htslib/tbx.h>
+#include <htslib/hts.h>
+#include <htslib/kstring.h>
 #include <htslib/regidx.h>
+#include <htslib/vcf.h>
 
 #include "../logging/log.h"
 #include "../predict.h"
@@ -18,19 +15,20 @@
 #include "../reference.h"
 #include "../gene_reference.h"
 #include "../gene_regions.h"
-
-#define VEP_CSQ "CSQ"
+#include "../variant_input.h"
+#include "../variant_output.h"
 
 #define REQUIRED_ARGS \
-    REQUIRED_STRING_ARG(variants, "variants", "VCF file containing variants (split multiallelics) to predict for using SpliceAI") \
+    REQUIRED_STRING_ARG(variants, "variants", "VCF or TSV file containing variants to predict for using SpliceAI") \
     REQUIRED_STRING_ARG(reference_bin, "reference_scores", "Binary file containing reference scores") \
     REQUIRED_STRING_ARG(model_dir, "model_dir", "Directory containing SpliceAI models") \
     REQUIRED_STRING_ARG(fasta, "fasta", "Human reference fasta") \
     REQUIRED_STRING_ARG(regions, "regions", "Gene region structure parsed from GFF with gff_to_bed.py") \
-    REQUIRED_STRING_ARG(output, "output", "Output VCF file with SpliceAI annotations")
+    REQUIRED_STRING_ARG(output, "output", "Annotated variants, in the same format as the input")
 
 #define OPTIONAL_ARGS \
-    OPTIONAL_INT_ARG(window_size, 500, "--window-size", "window size", "Window size for the SpliceAI predictions") \
+    OPTIONAL_INT_ARG(window_radius, 500, "--window-radius", "bases", "Bases scored either side of the variant") \
+    OPTIONAL_STRING_ARG(input_format, "auto", "--input-format", "vcf|tsv|auto", "Format of the variants file. Detected from the file itself by default") \
     OPTIONAL_STRING_ARG(splice_output, "\0", "--splice-output", "file", "Output TSV with sparse splice predictions per variant")
 
 #define BOOLEAN_ARGS \
@@ -38,92 +36,36 @@
 
 #include <easyargs.h>
 
-typedef struct {
-    char *consequence;
-    char *gene;
-} ConsequenceAnnotation;
+/*
+ * Score one alternate allele against one gene, appending the pipe-delimited annotation to
+ * *info_str.
+ *
+ * The gene is identified by name alone; gene_reference_update resolves its start, end and
+ * strand from the reference scores binary.
+ */
+int score_allele_for_gene(Model *models, faidx_t *fa, const Reference *ref, GeneReference *gene_reference, int window_radius, int window_size, const char *chrom, const char *gene_name, hts_pos_t pos, const char *ref_allele, char *alt_allele, kstring_t *info_str) {
+    int ref_len = strlen(ref_allele);
+    int alt_len = strlen(alt_allele);
 
-typedef struct {
-    ConsequenceAnnotation *annotations;
-    kstring_t field;
-} Consequences;
-
-int open_input_vcf(const char *path, htsFile **vcf, bcf_hdr_t **hdr) {
-    *vcf = bcf_open(path, "r");
-    if (*vcf == NULL) {
-        log_error("Failed to open VCF file: %s", path);
-        return EXIT_FAILURE;
-    }
-
-    *hdr = bcf_hdr_read(*vcf);
-    if (*hdr == NULL) {
-        log_error("Failed to read header from VCF file: %s", path);
-        bcf_close(*vcf);
-        return EXIT_FAILURE;
-    }
-
-    return EXIT_SUCCESS;
-}
-
-
-int prepare_output_vcf(const char *path, bcf_hdr_t *hdr, htsFile **out) {
-    *out = bcf_open(path, "w");
-    if (*out == NULL) {
-        log_error("Failed to open vcf output file: %s", path);
-        return EXIT_FAILURE;
-    }
-
-    if (bcf_hdr_append(hdr, SPLICEAI_DESC) != 0) {
-        log_error("Failed to append description for tag %s to vcf header.", SPLICEAI_TAG);
-        bcf_close(*out);
-        return EXIT_FAILURE;
-    }
-
-    if (bcf_hdr_write(*out, hdr) != 0) {
-        log_error("Failed to write to vcf file: %s", path);
-        bcf_close(*out);
-        return EXIT_FAILURE;
-    }
-
-    return EXIT_SUCCESS;
-}
-
-int gene_regions_build_regidx(const char *path, regidx_t **idx) {
-    FILE *fp = open_file_or_log(path, "r");
-    if (fp == NULL) return EXIT_FAILURE;
-
-    regidx_t *gene_index = regidx_init(NULL, NULL, NULL, sizeof(Gene), NULL);
-
-    Gene gene;
-    while (read_gene_region(fp, &gene) == 0) {
-        hts_pos_t beg = gene.tx_start, end = gene.tx_end;
-        char *chr = gene.chrom, *chr_end = chr + strlen(chr) + 1;
-        regidx_push(gene_index, chr, chr_end, beg, end, &gene);
-    }
-
-    *idx = gene_index;
-
-    return EXIT_SUCCESS;
-}
-
-int score_allele_for_gene(Model *models, faidx_t *fa, const Reference *ref, GeneReference *gene_reference, int distance, int cov, const bcf_hdr_t *hdr, bcf1_t *v, int allele_idx, Gene gene, int ref_len, kstring_t *info_str) {
-    int alt_len = strlen(v->d.allele[allele_idx]);
-
-    if (ref_len > distance || alt_len > distance) {
-        log_warn("Oversized indel found. Skipping prediction for at %s:%d:%s", bcf_hdr_id2name(hdr, v->rid), v->pos, gene.name);
+    if (ref_len > window_radius || alt_len > window_radius) {
+        log_warn("Oversized indel found. Skipping prediction for at %s:%"PRIhts_pos":%s", chrom, pos + 1, gene_name);
         kputc('.', info_str);
         return EXIT_SUCCESS;
     }
 
-    if (strncmp(gene.name, gene_reference->name, FIELD_MAX_LEN) != 0 && gene_reference_update(gene.chrom, gene.name, fa, ref, gene_reference) == EXIT_FAILURE) {
-        log_warn("Failed to find reference for gene %s. Skipping prediction for %s:%li:%s...", gene.name, bcf_hdr_id2name(hdr, v->rid), v->pos + 1, gene.name);
-        kputc('.', info_str);
-        return EXIT_SUCCESS;
+    // The name comparison is a cache; gene_reference_update clears the name on failure, so a
+    // match means the rest of the struct belongs to this gene.
+    if (strncmp(gene_name, gene_reference->name, FIELD_MAX_LEN) != 0) {
+        if (gene_reference_update(chrom, gene_name, fa, ref, gene_reference) == EXIT_FAILURE) {
+            log_warn("Failed to find reference for gene %s. Skipping prediction for %s:%"PRIhts_pos":%s...", gene_name, chrom, pos + 1, gene_name);
+            kputc('.', info_str);
+            return EXIT_SUCCESS;
+        }
     }
 
-    int num_ref_predictions = cov * NUM_SCORES;
+    int num_ref_predictions = window_size * NUM_SCORES;
     float *ref_predictions;
-    if (gene_reference_get_score_window(v->pos, distance, gene_reference, &ref_predictions) == EXIT_FAILURE) {
+    if (gene_reference_get_score_window(pos, window_radius, gene_reference, &ref_predictions) == EXIT_FAILURE) {
         // Memory issue, already logged by function
         return EXIT_FAILURE;
     }
@@ -133,27 +75,16 @@ int score_allele_for_gene(Model *models, faidx_t *fa, const Reference *ref, Gene
     float *alt_predictions;
 
     // The model trims BOUNDARY_SIZE (half of CONTEXT_SIZE) of context from each side of its
-    // input to produce predictions for the remaining "core" region, so the window fetched here
+    // input to produce predictions for the remaining "core" region, so the window built here
     // must reserve BOUNDARY_SIZE (not the full CONTEXT_SIZE) of margin on each side of the
-    // cov-wide region of interest for padded_seq's width (CONTEXT_SIZE + cov) to hold it.
-    hts_pos_t gene_pos = v->pos - gene.tx_start;
-    hts_pos_t start = gene_pos - (BOUNDARY_SIZE + distance);
-    hts_pos_t start_offset = 0;
-    if (start < 0) {
-        start_offset = -start;
-        start = 0;
-    }
+    // window_size-wide region of interest for padded_seq's width (CONTEXT_SIZE + window_size)
+    // to hold it.
+    hts_pos_t gene_pos = pos - gene_reference->start;
 
-    hts_pos_t gene_length = gene.tx_end - gene.tx_start;
-    hts_pos_t end = gene_pos + (BOUNDARY_SIZE + distance + 1);
-    if (end > gene_length) {
-        end = gene_length;
-    }
-
-    const int width = CONTEXT_SIZE + cov;
+    const int width = CONTEXT_SIZE + window_size;
     char padded_seq[width];
-    memset(padded_seq, 'N', width);
-    memcpy(padded_seq + start_offset, gene_reference->seq.s + start, end - start);
+    build_alt_window(&gene_reference->seq, gene_pos, ref_len, alt_allele, alt_len,
+                     padded_seq, width, BOUNDARY_SIZE + window_radius);
 
     if (predict_padded_sequence(models, padded_seq, width, gene_reference->strand, &alt_predictions, &num_alt_predictions) != EXIT_SUCCESS) {
         free(ref_predictions);
@@ -162,11 +93,11 @@ int score_allele_for_gene(Model *models, faidx_t *fa, const Reference *ref, Gene
 
     // Align
     if (alt_len != ref_len) {
-        align_predictions_alt_to_ref(distance, cov, ref_len, alt_len, &alt_predictions);
+        align_predictions_alt_to_ref(window_radius, window_size, ref_len, alt_len, &alt_predictions);
     }
 
     // Form scores
-    Score score = calculate_delta_scores(v->d.allele[allele_idx], gene.name, ref_predictions, alt_predictions, num_ref_predictions, distance);
+    Score score = calculate_delta_scores(alt_allele, (char *) gene_name, ref_predictions, alt_predictions, num_ref_predictions, window_radius);
     free(ref_predictions);
     free(alt_predictions);
 
@@ -184,50 +115,43 @@ int score_allele_for_gene(Model *models, faidx_t *fa, const Reference *ref, Gene
     return EXIT_SUCCESS;
 }
 
-int process_variant_record(Model *models, faidx_t *fa, const Reference *ref, GeneReference *gene_reference, int distance, int cov, regidx_t *gene_index, regitr_t *itr, bcf_hdr_t *hdr, bcf1_t *v, htsFile *vcf_out, const char *annotated_variants) {
-    bcf_unpack(v, BCF_UN_STR);
-    int ref_len = strlen(v->d.allele[0]);
-    // INFO: Could skip here if ref_len > distance, but this logic is kept with alt_len > distance for consistency in output
+/*
+ * Annotate one input record and hand it to the writer.
+ *
+ * annotations is scratch owned by the caller, holding at least record->n_alt entries: one
+ * annotation string per alternate allele, each comma-joining that allele's overlapping genes.
+ */
+int process_variant_record(Model *models, faidx_t *fa, const Reference *ref, GeneReference *gene_reference, int window_radius, int window_size, regidx_t *gene_index, regitr_t *itr, GeneList *genes, const VariantRecord *record, kstring_t *annotations, VariantWriter *writer) {
+    for (int i = 0; i < record->n_alt; i++) annotations[i].l = 0;
 
-    if (!regidx_overlap(gene_index, bcf_hdr_id2name(hdr, v->rid), v->pos, v->pos+1, itr)) {
-        if (bcf_write(vcf_out, hdr, v) != EXIT_SUCCESS) log_error("Writing failed for file: %s", annotated_variants);
-        return EXIT_SUCCESS;
+    // Nothing to say about a variant no gene fully contains: write it through untouched.
+    const int ref_len = strlen(record->ref);
+    if (gene_regions_containing(gene_index, itr, record->chrom, record->pos, ref_len, genes) == 0) {
+        return variant_writer_write(writer, record, annotations);
     }
 
-    kstring_t info_str = {0};
-    for (int i = 1; i < v->n_allele; i++) {
-        if ('.' == v->d.allele[i][0] || // Deletion
-            '*' == v->d.allele[i][0] || // Missing
-            '<' == v->d.allele[i][0] // <ID> string
+    for (int i = 0; i < record->n_alt; i++) {
+        char *alt_allele = record->alt[i];
+
+        if ('.' == alt_allele[0] || // Deletion
+            '*' == alt_allele[0] || // Missing
+            '<' == alt_allele[0] // <ID> string
         ) {
-            log_warn("Unsupported alternate allele found: %s. Skipping prediction(s) for %s:%li", v->d.allele[i], bcf_hdr_id2name(hdr, v->rid), v->pos+1);
-            if (info_str.l > 0) kputc(',', &info_str);
-            kputc('.', &info_str);
+            log_warn("Unsupported alternate allele found: %s. Skipping prediction(s) for %s:%"PRIhts_pos, alt_allele, record->chrom, record->pos + 1);
+            kputc('.', &annotations[i]);
             continue;
         }
 
-        while (regitr_overlap(itr)) {
-            if (info_str.l > 0) kputc(',', &info_str);
+        for (size_t g = 0; g < genes->n; g++) {
+            if (annotations[i].l > 0) kputc(',', &annotations[i]);
 
-            Gene gene = regitr_payload(itr, Gene);
-
-            if (score_allele_for_gene(models, fa, ref, gene_reference, distance, cov, hdr, v, i, gene, ref_len, &info_str) != EXIT_SUCCESS) {
-                free(info_str.s);
+            if (score_allele_for_gene(models, fa, ref, gene_reference, window_radius, window_size, record->chrom, genes->genes[g].name, record->pos, record->ref, alt_allele, &annotations[i]) != EXIT_SUCCESS) {
                 return EXIT_FAILURE;
             }
         }
     }
 
-    if (info_str.l > 0) {
-        bcf_update_info_string(hdr, v, SPLICEAI_TAG, info_str.s);
-        free(info_str.s);
-    }
-
-    if (bcf_write(vcf_out, hdr, v) != EXIT_SUCCESS) {
-        log_error("Writing failed for file: %s", annotated_variants);
-    }
-
-    return EXIT_SUCCESS;
+    return variant_writer_write(writer, record, annotations);
 }
 
 int main(int argc, char *argv[]) {
@@ -246,12 +170,24 @@ int main(int argc, char *argv[]) {
     const char *gene_regions = args.regions;
     const char *annotated_variants = args.output;
 
-    const int distance = args.window_size;
+    const int window_radius = args.window_radius;
     const char *prediction_output = args.splice_output;
-    const bool produce_splice_output = strncmp(prediction_output, "\0", 1) == 0;
+    const bool produce_splice_output = prediction_output[0] != '\0';
+    (void) produce_splice_output; // --splice-output is parsed but not yet implemented
 
-    // Load SpliceAI models
-    Model *models = load_models(model_dir);
+    // Opened before load_models so a bad format value or unusable path fails cheaply.
+    VariantFormat input_format;
+    if (variant_input_format_parse(args.input_format, &input_format) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    VariantReader *reader;
+    if (variant_reader_open(variants, input_format, &reader) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    VariantWriter *writer;
+    if (variant_writer_open(annotated_variants, reader, &writer) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    regidx_t *gene_index = NULL;
+    uint64_t regions_digest;
+    if (gene_regions_build_regidx(gene_regions, &gene_index, &regions_digest) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     Reference ref;
     if (reference_read(reference_bin, &ref) != EXIT_SUCCESS) {
@@ -262,43 +198,63 @@ int main(int argc, char *argv[]) {
     faidx_t *fa_in;
     if ((fa_in = fai_load(fasta)) == NULL) return EXIT_FAILURE; // Load reference fasta for sequence lookup
 
-    htsFile *vcf_in; bcf_hdr_t *hdr;
-    if (open_input_vcf(variants, &vcf_in, &hdr) != EXIT_SUCCESS) return EXIT_FAILURE; // Load input vcf
-
-
-    regidx_t *gene_index = NULL;
-    gene_regions_build_regidx(gene_regions, &gene_index);
-    if (gene_index == NULL) {
+    // Checked before load_models: a mismatch is silently wrong, not loudly broken.
+    if (reference_check_inputs(&ref, fasta_digest(fa_in), regions_digest, reference_bin) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     }
 
-    htsFile *vcf_out;
-    if (prepare_output_vcf(annotated_variants, hdr, &vcf_out) != EXIT_SUCCESS) return EXIT_FAILURE; // Prepare output vcf
+    // Load SpliceAI models
+    Model *models = load_models(model_dir);
 
-    // Sequence size
-    const int cov = 2 * distance + 1;
+    // Bases scored: the variant plus window_radius either side.
+    const int window_size = 2 * window_radius + 1;
 
     // Loop initialisations
     regitr_t *itr = regitr_init(gene_index);
-    bcf1_t *v = bcf_init();
+    GeneList genes;
+    gene_list_init(&genes);
     GeneReference gene_reference;
     gene_reference_init(&gene_reference);
-    while (bcf_read(vcf_in, hdr, v) >= 0) {
-        if (!v) continue; // TODO: Can this even happen given bcf_init? Also, need to handle the non critical reading errors.
 
-        if (process_variant_record(models, fa_in, &ref, &gene_reference, distance, cov, gene_index, itr, hdr, v, vcf_out, annotated_variants) != EXIT_SUCCESS) {
-            return EXIT_FAILURE;
+    // One annotation string per alternate allele, grown to fit the widest record seen.
+    kstring_t *annotations = NULL;
+    int m_annotations = 0;
+
+    int ret = EXIT_SUCCESS;
+    VariantRecord record;
+    int read_status;
+    while ((read_status = variant_reader_next(reader, &record)) == EXIT_SUCCESS) {
+        if (record.n_alt > m_annotations) {
+            kstring_t *grown = realloc(annotations, record.n_alt * sizeof(kstring_t));
+            if (grown == NULL) {
+                log_fatal("Failed to allocate %zu bytes for annotations", record.n_alt * sizeof(kstring_t));
+                exit(EXIT_FAILURE);
+            }
+            annotations = grown;
+            memset(annotations + m_annotations, 0, (record.n_alt - m_annotations) * sizeof(kstring_t));
+            m_annotations = record.n_alt;
+        }
+
+        if (process_variant_record(models, fa_in, &ref, &gene_reference, window_radius, window_size, gene_index, itr, &genes, &record, annotations, writer) != EXIT_SUCCESS) {
+            ret = EXIT_FAILURE;
+            break;
         }
     }
 
-    bcf_destroy(v);
+    if (read_status == EXIT_FAILURE) ret = EXIT_FAILURE;
+
+    for (int i = 0; i < m_annotations; i++) free(annotations[i].s);
+    free(annotations);
+
+    gene_reference_destroy(&gene_reference);
+    gene_list_destroy(&genes);
     regitr_destroy(itr);
+    regidx_destroy(gene_index);
+    variant_writer_close(writer);
+    variant_reader_close(reader);
     fai_destroy(fa_in);
-    hts_close(vcf_in); hts_close(vcf_out);
-    bcf_hdr_destroy(hdr);
 
     destroy_models(models);
 
-    return EXIT_SUCCESS;
+    return ret;
 }
-

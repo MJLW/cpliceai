@@ -1,12 +1,13 @@
-#include <htslib/hts.h>
-#include <htslib/kstring.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <htslib/faidx.h>
-#include <string.h>
+#include <htslib/hts.h>
+#include <htslib/kstring.h>
+#include <htslib/regidx.h>
 
 #include "../logging/log.h"
 #include "../predict.h"
@@ -14,122 +15,46 @@
 #include "../gene_reference.h"
 #include "../reference.h"
 #include "../utils.h"
-
-#define MAX_LINE 8192
+#include "../variant_input.h"
 
 #define SCORE_THRESHOLD ZERO_EPSILON
 
 #define REQUIRED_ARGS \
-    REQUIRED_STRING_ARG(variants, "variants", "TSV file containing variants to predict for using SpliceAI") \
+    REQUIRED_STRING_ARG(variants, "variants", "VCF or TSV file containing variants to predict for using SpliceAI") \
     REQUIRED_STRING_ARG(reference_bin, "reference_scores", "Binary file containing reference scores") \
     REQUIRED_STRING_ARG(model_dir, "model_dir", "Directory containing SpliceAI models") \
     REQUIRED_STRING_ARG(fasta, "fasta", "Human reference fasta") \
-    REQUIRED_STRING_ARG(output, "output", "TSV of splice sites found, where REF>0.2|ALT>0.2.")
+    REQUIRED_STRING_ARG(regions, "regions", "Gene region structure parsed from GFF with gff_to_bed.py") \
+    REQUIRED_STRING_ARG(output, "output", "TSV of splice sites found, where REF or ALT scores exceed 0.001.")
+
+#define OPTIONAL_ARGS \
+    OPTIONAL_STRING_ARG(input_format, "auto", "--input-format", "vcf|tsv|auto", "Format of the variants file. Detected from the file itself by default")
 
 #define BOOLEAN_ARGS \
     BOOLEAN_ARG(help, "-h", "Show help")
 
 #include <easyargs.h>
 
-
-typedef struct {
-    char chr[FIELD_MAX_LEN];
-    uint64_t pos;
-    char ref[FIELD_MAX_LEN];
-    char alt[FIELD_MAX_LEN];
-    char gene[FIELD_MAX_LEN];
-} Variant;
-
-static int parse_line(const char *line, Variant *snv) {
-    char buf[MAX_LINE];
-    strncpy(buf, line, MAX_LINE-1);
-    buf[MAX_LINE-1] = '\0';
-    buf[strcspn(buf, "\r\n")] = '\0';
-
-    char *cursor = buf;
-    char *tok;
-    tok = next_tsv_field(&cursor);
-    if (!tok) {
-        log_error("Failed to parse SNV contig from line: %s", line);
-        return EXIT_FAILURE;
-    }
-    strncpy(snv->chr, tok, FIELD_MAX_LEN-1);
-    snv->chr[FIELD_MAX_LEN-1] = '\0';
-
-    tok = next_tsv_field(&cursor);
-    if (!tok) {
-        log_error("Failed to parse SNV position from line: %s", line);
-        return EXIT_FAILURE;
-    }
-    char *end_pos;
-    snv->pos = strtoull(tok, &end_pos, 10) - 1;
-    if (end_pos[0] != '\0') {
-        log_error("Failed to parse %s into a positive integer.", tok);
-        return EXIT_FAILURE;
-    }
-
-    tok = next_tsv_field(&cursor);
-    if (!tok) {
-        log_error("Failed to parse reference base(s) from line: %s", line);
-        return EXIT_FAILURE;
-    }
-    strncpy(snv->ref, tok, FIELD_MAX_LEN-1);
-    snv->ref[FIELD_MAX_LEN-1] = '\0';
-
-    tok = next_tsv_field(&cursor);
-    if (!tok) {
-        log_error("Failed to parse alternative base(s) from line: %s", line);
-        return EXIT_FAILURE;
-    }
-    strncpy(snv->alt, tok, FIELD_MAX_LEN-1);
-    snv->alt[FIELD_MAX_LEN-1] = '\0';
-
-    tok = next_tsv_field(&cursor);
-    if (!tok) {
-        log_error("Failed to parse SNV gene from line: %s", line);
-        return EXIT_FAILURE;
-    }
-    strncpy(snv->gene, tok, FIELD_MAX_LEN-1);
-    snv->gene[FIELD_MAX_LEN-1] = '\0';
-
-    return EXIT_SUCCESS;
-}
-
-int variant_tsv_read_next(FILE *fp, Variant *variant) {
-    char line[MAX_LINE];
-
-    // WARN: Assumes skipped/no header
-    while(fgets(line, sizeof(line), fp) != NULL) {
-        if (line[0] == '\n' || line[0] == '\r') continue;
-
-        if (parse_line(line, variant) != EXIT_SUCCESS) {
-            log_error("Failed parsing of %s");
-            return EXIT_FAILURE;
-        }
-
-        return EXIT_SUCCESS;
-
-    }
-
-    return EXIT_FAILURE;
-}
-
-int process_variant_row(Model *models, faidx_t *fa, const Reference *ref, GeneReference *current_gene, const Variant *variant, float **alt_predictions, int *num_alt_predictions) {
+/*
+ * Predict over the whole gene with one alternate allele substituted in, leaving
+ * *alt_predictions aligned position-for-position with the gene's reference scores.
+ */
+int process_variant_row(Model *models, faidx_t *fa, const Reference *ref, GeneReference *current_gene, const char *chrom, const char *gene_name, hts_pos_t pos, const char *ref_allele, const char *alt_allele, float **alt_predictions, int *num_alt_predictions) {
     // If gene is different from previous variant, we need to load the reference scores for the current gene
-    if (strncmp(variant->gene, current_gene->name, FIELD_MAX_LEN) != 0) {
-        if (gene_reference_update(variant->chr, variant->gene, fa, ref, current_gene) != EXIT_SUCCESS) {
-            log_warn("Failed to find reference for gene %s. Skipping variant %s:%li.", variant->gene, variant->chr, variant->pos + 1);
+    if (strncmp(gene_name, current_gene->name, FIELD_MAX_LEN) != 0) {
+        if (gene_reference_update(chrom, gene_name, fa, ref, current_gene) != EXIT_SUCCESS) {
+            log_warn("Failed to find reference for gene %s. Skipping variant %s:%"PRIhts_pos".", gene_name, chrom, pos + 1);
             return EXIT_FAILURE;
         }
     }
 
     // Replace ref by alt in gene sequence
-    const int ref_len = strnlen(variant->ref, FIELD_MAX_LEN);
-    const int alt_len = strnlen(variant->alt, FIELD_MAX_LEN);
-    const uint64_t pos_in_gene = variant->pos - current_gene->start;
+    const int ref_len = strlen(ref_allele);
+    const int alt_len = strlen(alt_allele);
+    const uint64_t pos_in_gene = pos - current_gene->start;
 
     kstring_t alt = { 0 };
-    create_alt_seq(&current_gene->seq, pos_in_gene, ref_len, alt_len, variant->alt, &(alt.s), &(alt.l));
+    create_alt_seq(&current_gene->seq, pos_in_gene, ref_len, alt_len, alt_allele, &(alt.s), &(alt.l));
 
     // Add BOUNDAR_SIZE'd padding to the gene sequence, so that each position of the gene gets a prediction
     int padded_slen = alt.l + CONTEXT_SIZE;
@@ -181,8 +106,16 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Load SpliceAI tensorflow models
-    Model *models = load_models(args.model_dir);
+    // Opened before load_models so a bad format value or unreadable path fails cheaply.
+    VariantFormat input_format;
+    if (variant_input_format_parse(args.input_format, &input_format) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    VariantReader *reader;
+    if (variant_reader_open(args.variants, input_format, &reader) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    regidx_t *gene_index = NULL;
+    uint64_t regions_digest;
+    if (gene_regions_build_regidx(args.regions, &gene_index, &regions_digest) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     // Load reference from binary file
     Reference ref;
@@ -195,43 +128,67 @@ int main(int argc, char *argv[]) {
     faidx_t *fa_in;
     if ((fa_in = fai_load(args.fasta)) == NULL) return EXIT_FAILURE; // Load reference fasta for sequence lookup
 
-    FILE *variants_fp = open_file_or_log(args.variants, "r");
-    if (variants_fp == NULL) return EXIT_FAILURE;
+    // Checked before load_models: a mismatch is silently wrong, not loudly broken.
+    if (reference_check_inputs(&ref, fasta_digest(fa_in), regions_digest, args.reference_bin) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
 
     FILE *output = open_file_or_log(args.output, "w");
     if (output == NULL) return EXIT_FAILURE;
 
-    // Skip first line
-    char buffer[MAX_LINE];
-    if (fgets(buffer, sizeof(buffer), variants_fp) == NULL) {
-        log_error("Could not read from file: %s", args.variants);
-        return EXIT_FAILURE;
-    }
+    // Load SpliceAI tensorflow models
+    Model *models = load_models(args.model_dir);
 
-    // Loop over VCF variants
-    Variant variant;
+    // Loop initialisations
+    regitr_t *itr = regitr_init(gene_index);
+    GeneList genes;
+    gene_list_init(&genes);
     GeneReference current_gene;
     gene_reference_init(&current_gene);
 
-    while (variant_tsv_read_next(variants_fp, &variant) == EXIT_SUCCESS) {
-        float *alt_predictions;
-        int num_alt_predictions;
-        if (process_variant_row(models, fa_in, &ref, &current_gene, &variant, &alt_predictions, &num_alt_predictions) != EXIT_SUCCESS) {
+    int ret = EXIT_SUCCESS;
+    VariantRecord record;
+    int read_status;
+    while ((read_status = variant_reader_next(reader, &record)) == EXIT_SUCCESS) {
+        const int record_ref_len = strlen(record.ref);
+        if (gene_regions_containing(gene_index, itr, record.chrom, record.pos, record_ref_len, &genes) == 0) {
+            log_warn("No gene fully contains %s:%"PRIhts_pos". Skipping variant.", record.chrom, record.pos + 1);
             continue;
         }
 
-        fprintf(output, "#%s_%c_%li_%li:%s_%li_%s_%s\n", variant.gene, current_gene.strand, current_gene.start, current_gene.end, variant.chr, variant.pos+1, variant.ref, variant.alt);
+        // One score block per (allele, gene) pair: each is an independent prediction.
+        for (int i = 0; i < record.n_alt; i++) {
+            for (size_t g = 0; g < genes.n; g++) {
+                const Gene *gene = &genes.genes[g];
 
-        log_info("%s\t%li\t%li\t%s\t%c\t%i", variant.chr, current_gene.start, current_gene.end, current_gene.name, current_gene.strand, current_gene.end - current_gene.start);
+                float *alt_predictions;
+                int num_alt_predictions;
+                if (process_variant_row(models, fa_in, &ref, &current_gene, record.chrom, gene->name, record.pos, record.ref, record.alt[i], &alt_predictions, &num_alt_predictions) != EXIT_SUCCESS) {
+                    continue;
+                }
 
-        write_gene_scores(output, &current_gene, alt_predictions);
+                fprintf(output, "#%s_%c_%li_%li:%s_%"PRIhts_pos"_%s_%s\n", gene->name, current_gene.strand, current_gene.start, current_gene.end, record.chrom, record.pos + 1, record.ref, record.alt[i]);
 
-        free(alt_predictions);
+                log_info("%s\t%li\t%li\t%s\t%c\t%i", record.chrom, current_gene.start, current_gene.end, current_gene.name, current_gene.strand, current_gene.end - current_gene.start);
+
+                write_gene_scores(output, &current_gene, alt_predictions);
+
+                free(alt_predictions);
+            }
+        }
     }
 
-    if (current_gene.seq.s != NULL) free(current_gene.seq.s);
-    free(current_gene.scores);
+    if (read_status == EXIT_FAILURE) ret = EXIT_FAILURE;
+
+    gene_reference_destroy(&current_gene);
+    gene_list_destroy(&genes);
+    regitr_destroy(itr);
+    regidx_destroy(gene_index);
+    variant_reader_close(reader);
+    fclose(output);
+    fai_destroy(fa_in);
 
     destroy_models(models);
-}
 
+    return ret;
+}

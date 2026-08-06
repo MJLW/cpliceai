@@ -1,0 +1,6 @@
+##fileformat=VCFv4.2
+##contig=<ID=chrTest,length=2000>
+##FILTER=<ID=LowQual,Description="Low quality">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chrTest	1000	rs12345	G	A	99.5	LowQual	DP=42

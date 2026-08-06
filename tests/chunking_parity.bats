@@ -29,10 +29,10 @@ FORCED_MAX_CHUNK_LEN=10500
         "$CPLICEAI_REFERENCE_BIN" "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$ref_chunked"
     [ "$status" -eq 0 ]
 
-    run "$CPLICEAI_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ref_default" "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$tsv_default"
+    run "$CPLICEAI_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ref_default" "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$tsv_default"
     [ "$status" -eq 0 ]
     run env "CPLICEAI_ORT_MAX_CHUNK_LEN=$FORCED_MAX_CHUNK_LEN" \
-        "$CPLICEAI_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ref_chunked" "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$tsv_chunked"
+        "$CPLICEAI_PREDICT_GENE_BIN" "$FIXTURES_DIR/variants.tsv" "$ref_chunked" "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" "$tsv_chunked"
     [ "$status" -eq 0 ]
 
     # reference.bin is a sensitive canary for numerical drift, same rationale as

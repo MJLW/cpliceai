@@ -33,7 +33,9 @@ int reference_alloc(
     size_t off_scores = align_up(off_chunks + m_chunks * sizeof(Chunk), _Alignof(PositionScore));
     size_t total = off_scores + m_scores * sizeof(PositionScore);
 
-    char *block = malloc(total);
+    // Zeroed: Region and Chunk have interior padding that no field writes, and reference_write
+    // copies whole structs, so uninitialised padding would reach the file.
+    char *block = calloc(total, 1);
     if (block == NULL) return EXIT_FAILURE;
 
     ref->block = block;
@@ -67,10 +69,14 @@ int reference_resize(Reference *ref) {
     size_t new_block_size = ref->block_size + ref->m_scores * sizeof(PositionScore);
 
     const char *old_block_ptr = ref->block;
+    const size_t old_block_size = ref->block_size;
     ref->block = realloc(ref->block, new_block_size);
     if (ref->block == NULL) {
         return EXIT_FAILURE;
     }
+
+    // realloc does not zero what it adds.
+    memset(ref->block + old_block_size, 0, new_block_size - old_block_size);
 
     ref->block_size = new_block_size;
     ref->m_scores += ref->m_scores;
@@ -129,33 +135,36 @@ void reference_add_contig(const Contig contig, const char *name, Reference *ref)
 
 int reference_write(const char *path, const Reference *ref) {
     // --- Calculate offsets ---
+    //
+    // Packed to the filled counts (n_*, *_len) rather than the arena's capacities, so the file
+    // is not a verbatim image of the arena and each array is copied individually below.
     size_t off = sizeof(FileHeader);
 
     size_t off_block = off;
 
     size_t off_contigs = align_up(off, _Alignof(Contig));
-    off = off_contigs + ref->m_contigs * sizeof(Contig);
+    off = off_contigs + ref->n_contigs * sizeof(Contig);
 
     size_t off_contig_names = off;  // char[], no alignment needed
-    off += ref->contig_names_cap;
+    off += ref->contig_names_len;
 
     size_t off_genes = align_up(off, _Alignof(Region));
-    off = off_genes + ref->m_genes * sizeof(Region);
+    off = off_genes + ref->n_genes * sizeof(Region);
 
     size_t off_gene_starts = align_up(off, _Alignof(uint64_t));
-    off = off_gene_starts + ref->m_genes * sizeof(uint64_t);
+    off = off_gene_starts + ref->n_genes * sizeof(uint64_t);
 
     size_t off_gene_ends = align_up(off, _Alignof(uint64_t));
-    off = off_gene_ends + ref->m_genes * sizeof(uint64_t);
+    off = off_gene_ends + ref->n_genes * sizeof(uint64_t);
 
     size_t off_region_names = off;
-    off += ref->region_names_cap;
+    off += ref->region_names_len;
 
     size_t off_chunks = align_up(off, _Alignof(Chunk));
-    off = off_chunks + ref->m_chunks * sizeof(Chunk);
+    off = off_chunks + ref->n_chunks * sizeof(Chunk);
 
     size_t off_scores = align_up(off, _Alignof(PositionScore));
-    off = off_scores + ref->m_scores * sizeof(PositionScore);
+    off = off_scores + ref->n_scores * sizeof(PositionScore);
 
     size_t file_size = off;
 
@@ -188,8 +197,8 @@ int reference_write(const char *path, const Reference *ref) {
         .n_genes         = ref->n_genes,
         .n_chunks        = ref->n_chunks,
         .n_scores        = ref->n_scores,
-        .m_scores        = ref->m_scores,
-        .block_size      = ref->block_size,
+        .m_scores        = ref->n_scores, // packed file: capacity equals count
+        .block_size      = file_size - off_block,
         .region_names_len= ref->region_names_len,
         .off_contigs     = off_contigs,
         .off_contig_names= off_contig_names,
@@ -199,11 +208,22 @@ int reference_write(const char *path, const Reference *ref) {
         .off_region_names= off_region_names,
         .off_chunks      = off_chunks,
         .off_scores      = off_scores,
-        .off_block       = off_block
+        .off_block       = off_block,
+        .fasta_digest    = ref->fasta_digest,
+        .regions_digest  = ref->regions_digest
     };
 
     memcpy(base, &hdr, sizeof(hdr));
-    memcpy(base + off_block, ref->block, ref->block_size);
+
+    // Inter-array alignment gaps are left as the zeros ftruncate produced.
+    memcpy(base + off_contigs,      ref->contigs,      ref->n_contigs * sizeof(Contig));
+    memcpy(base + off_contig_names, ref->contig_names, ref->contig_names_len);
+    memcpy(base + off_genes,        ref->genes,        ref->n_genes * sizeof(Region));
+    memcpy(base + off_gene_starts,  ref->gene_starts,  ref->n_genes * sizeof(uint64_t));
+    memcpy(base + off_gene_ends,    ref->gene_ends,    ref->n_genes * sizeof(uint64_t));
+    memcpy(base + off_region_names, ref->region_names, ref->region_names_len);
+    memcpy(base + off_chunks,       ref->chunks,       ref->n_chunks * sizeof(Chunk));
+    memcpy(base + off_scores,       ref->scores,       ref->n_scores * sizeof(PositionScore));
 
     // Clear mmap
     munmap(base, file_size);
@@ -218,8 +238,17 @@ int reference_read(const char *path, Reference *ref) {
     FileHeader hdr;
     if (read(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) { close(fd); return EXIT_FAILURE; }
 
-    if (hdr.magic != REF_MAGIC || hdr.version != REF_VERSION) {
-        fprintf(stderr, "Bad magic or version\n");
+    if (hdr.magic != REF_MAGIC) {
+        fprintf(stderr, "%s is not a reference scores file (bad magic)\n", path);
+        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    if (hdr.version != REF_VERSION) {
+        fprintf(stderr,
+                "%s was written by reference scores version %llu, but this build reads "
+                "version %d. Rebuild it with cpliceai_reference.\n",
+                path, (unsigned long long) hdr.version, REF_VERSION);
         close(fd);
         return EXIT_FAILURE;
     }
@@ -241,9 +270,11 @@ int reference_read(const char *path, Reference *ref) {
     ref->n_chunks         = hdr.n_chunks;
     ref->m_chunks         = hdr.n_chunks;
     ref->n_scores         = hdr.n_scores;
-    ref->m_scores         = hdr.m_scores;
+    ref->m_scores         = hdr.n_scores; // the file is packed; there is no spare capacity
     ref->block_size       = hdr.block_size;
     ref->region_names_len = hdr.region_names_len;
+    ref->fasta_digest     = hdr.fasta_digest;
+    ref->regions_digest   = hdr.regions_digest;
     ref->region_names_cap = hdr.region_names_len;
 
     // Populate structure
@@ -258,6 +289,30 @@ int reference_read(const char *path, Reference *ref) {
     ref->scores        = (PositionScore *) (base + hdr.off_scores);
 
     return EXIT_SUCCESS;
+}
+
+int reference_check_inputs(const Reference *ref, uint64_t fasta_digest,
+                           uint64_t regions_digest, const char *ref_path) {
+    int ret = EXIT_SUCCESS;
+
+    if (ref->fasta_digest != fasta_digest) {
+        log_error("The reference fasta does not match the one %s was built from "
+                  "(contig names and lengths differ). Predictions would be scored against the "
+                  "wrong sequence. Rebuild with cpliceai_reference, or pass the original fasta.",
+                  ref_path);
+        ret = EXIT_FAILURE;
+    }
+
+    if (ref->regions_digest != regions_digest) {
+        log_error("The gene regions file does not match the one %s was built from "
+                  "(gene names, coordinates or strands differ). Predictions would be scored "
+                  "against the wrong gene set. Rebuild with cpliceai_reference, or pass the "
+                  "original regions file.",
+                  ref_path);
+        ret = EXIT_FAILURE;
+    }
+
+    return ret;
 }
 
 void reference_unmap(char *base, size_t size) {

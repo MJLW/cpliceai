@@ -80,6 +80,7 @@ add_library(range STATIC src/range.c)
 add_library(gene_regions STATIC src/gene_regions.c)
 add_library(reference STATIC src/reference.c)
 add_library(gene_reference STATIC src/gene_reference.c)
+add_library(variant_io STATIC src/variant_input.c src/variant_output.c)
 
 set(CPLICEAI_COMMON_LIBS logging predict utils range gene_regions reference)
 
@@ -94,6 +95,7 @@ add_executable(cpliceai_predict_variant src/bin/predict_variant.c)
 target_link_libraries(cpliceai_predict_variant PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
+    variant_io
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -101,6 +103,7 @@ add_executable(cpliceai_predict_gene src/bin/predict_gene.c)
 target_link_libraries(cpliceai_predict_gene PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
+    variant_io
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -114,7 +117,7 @@ find_program(BATS_EXECUTABLE bats REQUIRED)
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     set(CPLICEAI_TEST_MODEL_DIR "${CMAKE_SOURCE_DIR}/models/onnx")
 else()
-    set(CPLICEAI_TEST_MODEL_DIR "${CMAKE_SOURCE_DIR}/models")
+    set(CPLICEAI_TEST_MODEL_DIR "${CMAKE_SOURCE_DIR}/models/tf")
 endif()
 
 set(CPLICEAI_TEST_ENVIRONMENT
@@ -153,6 +156,23 @@ set_tests_properties(e2e_pipeline PROPERTIES
 
 # Chunking is only implemented in the onnxruntime backend's predict_ort.c (the tensorflow
 # backend never hit the GPU OOM this mitigates), so only register this test for that backend.
+# Slow test: cross-format equivalence across both binaries, both input formats and both
+# output formats. Runs real inference like e2e_pipeline, over the same tiny fixture.
+# Gene-boundary behaviour, especially indels running past a gene's edge.
+add_test(NAME boundaries
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/boundaries.bats)
+set_tests_properties(boundaries PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 900)
+
+add_test(NAME input_formats
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/input_formats.bats)
+set_tests_properties(input_formats PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 900)
+
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     add_test(NAME chunking_parity
         COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/chunking_parity.bats)
@@ -187,6 +207,8 @@ add_library(libcpliceai SHARED
     src/gene_regions.c
     src/reference.c
     src/gene_reference.c
+    src/variant_input.c
+    src/variant_output.c
     src/logging/log.c)
 target_include_directories(libcpliceai PUBLIC src/)
 target_include_directories(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_INCLUDE_DIRS})
@@ -207,4 +229,6 @@ install(FILES
     src/gene_regions.h
     src/reference.h
     src/gene_reference.h
+    src/variant_input.h
+    src/variant_output.h
     DESTINATION include/cpliceai)

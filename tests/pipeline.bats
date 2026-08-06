@@ -18,6 +18,52 @@ load 'lib/common'
     [ -s "$ref_bin" ]
 }
 
+@test "cpliceai_reference is byte-reproducible" {
+    # Two runs on identical input must agree exactly. Requires the deterministic-inference
+    # environment set in CMakeLists.txt.
+    run "$CPLICEAI_REFERENCE_BIN" \
+        "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" \
+        "$TEST_TMPDIR/first.bin"
+    [ "$status" -eq 0 ]
+
+    run "$CPLICEAI_REFERENCE_BIN" \
+        "$MODEL_DIR" "$FIXTURES_DIR/chrTest.fasta" "$FIXTURES_DIR/regions.tsv" \
+        "$TEST_TMPDIR/second.bin"
+    [ "$status" -eq 0 ]
+
+    run cmp "$TEST_TMPDIR/first.bin" "$TEST_TMPDIR/second.bin"
+    [ "$status" -eq 0 ]
+}
+
+@test "a soft-masked reference scores identically to an unmasked one" {
+    # Soft-masked references lowercase repeat regions and faidx_fetch_seq preserves case, so
+    # the encoder must treat both cases alike. Same bases here, differing only in case.
+    awk 'NR==1{print; next}{print tolower($0)}' \
+        "$FIXTURES_DIR/chrTest.fasta" > "$TEST_TMPDIR/soft.fasta"
+    cp "$FIXTURES_DIR/chrTest.fasta.fai" "$TEST_TMPDIR/soft.fasta.fai"
+
+    for case_variant in upper lower; do
+        local fasta="$FIXTURES_DIR/chrTest.fasta"
+        [ "$case_variant" = lower ] && fasta="$TEST_TMPDIR/soft.fasta"
+
+        run "$CPLICEAI_REFERENCE_BIN" \
+            "$MODEL_DIR" "$fasta" "$FIXTURES_DIR/regions.tsv" \
+            "$TEST_TMPDIR/$case_variant.bin"
+        [ "$status" -eq 0 ]
+
+        run "$CPLICEAI_PREDICT_GENE_BIN" \
+            "$FIXTURES_DIR/variants.tsv" "$TEST_TMPDIR/$case_variant.bin" "$MODEL_DIR" \
+            "$fasta" "$FIXTURES_DIR/regions.tsv" "$TEST_TMPDIR/$case_variant.tsv"
+        [ "$status" -eq 0 ]
+    done
+
+    run diff "$TEST_TMPDIR/upper.tsv" "$TEST_TMPDIR/lower.tsv"
+    [ "$status" -eq 0 ]
+
+    # Not vacuously equal: the run must actually have scored something.
+    [ "$(grep -vc '^#' "$TEST_TMPDIR/upper.tsv")" -gt 0 ]
+}
+
 @test "cpliceai_reference fails cleanly on a missing regions file" {
     run "$CPLICEAI_REFERENCE_BIN" \
         "$MODEL_DIR" \
@@ -38,8 +84,11 @@ load 'lib/common'
         "$ref_bin"
     [ "$status" -eq 0 ]
 
+    # chrTest:113 G>A destroys the canonical GT donor dinucleotide at 113-114, belonging to the
+    # donor site scored 0.63 at position 112. Abolishing the site is what makes DS_DL 0.63 and
+    # DP_DL -1, so both expectations follow from the sequence rather than from a recorded run.
     run "$CPLICEAI_PREDICT_VARIANT_BIN" \
-        "$FIXTURES_DIR/variants.vcf" \
+        "$FIXTURES_DIR/variants.donor.vcf" \
         "$ref_bin" \
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
@@ -52,13 +101,15 @@ load 'lib/common'
     [ "$status" -eq 0 ]
     [[ "$output" == *"##INFO=<ID=SpliceAI,"* ]]
 
-    # Check the delta scores (DS_AG|DS_AL|DS_DG|DS_DL) to 2dp; already %.2f-formatted
-    # by cpliceai_predict_variant itself. Skip the DP_* delta-position integers -
-    # they're argmax indices over near-flat, near-zero deltas here, so they're more
-    # sensitive to float noise than the scores actually being checked.
+    # Delta scores (DS_AG|DS_AL|DS_DG|DS_DL) to 2dp, already %.2f-formatted by
+    # cpliceai_predict_variant itself.
     run bash -c "bcftools view -H '$output_vcf' | cut -f8 | sed 's/^SpliceAI=//' | awk -F'|' '{printf \"%s|%s|%s|%s\", \$3, \$4, \$5, \$6}'"
     [ "$status" -eq 0 ]
-    [ "$output" = "0.00|0.00|0.00|0.00" ]
+    [ "$output" = "0.01|0.00|0.16|0.63" ]
+
+    # The donor loss is located one base upstream of the variant, at the site it destroyed.
+    run bash -c "bcftools view -H '$output_vcf' | cut -f8 | sed 's/^SpliceAI=//' | awk -F'|' '{print \$10}'"
+    [ "$output" = "-1" ]
 }
 
 @test "cpliceai_predict_gene reports per-position splice scores for the variant" {
@@ -77,6 +128,7 @@ load 'lib/common'
         "$ref_bin" \
         "$MODEL_DIR" \
         "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.tsv" \
         "$output_tsv"
     [ "$status" -eq 0 ]
     [ -s "$output_tsv" ]

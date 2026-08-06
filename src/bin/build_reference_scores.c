@@ -31,9 +31,21 @@
 #include <easyargs.h>
 
 
-int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
+/*
+ * First pass: size the Reference from the regions file. Uses its own reader because htsFile
+ * has no portable rewind.
+ */
+int init_ref_from_gene_region_scan(const char *path, Reference *ref) {
+    GeneRegionReader *gene_regions;
+    if (gene_region_reader_open(path, &gene_regions) != EXIT_SUCCESS) return EXIT_FAILURE;
+
     Gene gene = { 0 };
-    int ret = read_gene_region(gene_regions, &gene);
+    int ret = gene_region_reader_next(gene_regions, &gene);
+    if (ret != EXIT_SUCCESS) {
+        log_error("No gene regions found in %s", path);
+        gene_region_reader_close(gene_regions);
+        return EXIT_FAILURE;
+    }
 
     uint32_t n_contigs = 1;
     uint32_t contig_bytes = strnlen(gene.chrom, FIELD_MAX_LEN) + 1;
@@ -45,7 +57,7 @@ int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
     uint64_t region_size = gene.tx_end - gene.tx_start;
     uint64_t n_chunks = (region_size / CHUNK_SIZE) + ((region_size % CHUNK_SIZE) > 0);
 
-    while ((ret = read_gene_region(gene_regions, &gene)) == 0) {
+    while ((ret = gene_region_reader_next(gene_regions, &gene)) == EXIT_SUCCESS) {
         if (strncmp(current_contig, gene.chrom, FIELD_MAX_LEN) != 0) {
             n_contigs++;
             contig_bytes += strnlen(gene.chrom, FIELD_MAX_LEN) + 1;
@@ -62,7 +74,9 @@ int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
     }
 
     free(current_contig);
-    rewind(gene_regions);
+    gene_region_reader_close(gene_regions);
+
+    if (ret == EXIT_FAILURE) return EXIT_FAILURE;
 
     reference_alloc(ref, n_contigs, contig_bytes, n_regions, region_bytes, n_chunks, n_chunks);
 
@@ -70,8 +84,13 @@ int init_ref_from_gene_region_scan(FILE *gene_regions, Reference *ref) {
 }
 
 int process_gene_region(Model *models, faidx_t *fa, const Gene *gene, Reference *ref) {
+    // tx_end is exclusive; faidx_fetch_seq's range is inclusive.
     int slen;
-    char *seq = faidx_fetch_seq(fa, gene->chrom, (int) gene->tx_start, (int) gene->tx_end, &slen);
+    char *seq = faidx_fetch_seq(fa, gene->chrom, (int) gene->tx_start, (int) gene->tx_end - 1, &slen);
+    if (seq == NULL) {
+        log_error("Could not fetch %s:%li-%li from the reference fasta", gene->chrom, gene->tx_start, gene->tx_end);
+        return EXIT_FAILURE;
+    }
     seq[slen] = '\0';
 
     // Add BOUNDAR_SIZE'd padding to the gene sequence, so that each position of the gene gets a prediction
@@ -135,11 +154,12 @@ int main(int argc, char *argv[]) {
     Model *models = load_models(model_dir);
 
     // Load annotations for transcript regions
-    FILE *gene_regions_in = open_file_or_log(gene_regions, "r");
-    if (gene_regions_in == NULL) return EXIT_FAILURE;
-
     Reference ref;
-    init_ref_from_gene_region_scan(gene_regions_in, &ref);
+    if (init_ref_from_gene_region_scan(gene_regions, &ref) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    GeneRegionReader *gene_regions_in;
+    if (gene_region_reader_open(gene_regions, &gene_regions_in) != EXIT_SUCCESS) return EXIT_FAILURE;
+
 
     // Load reference fasta for sequence lookup
     faidx_t *fa_in;
@@ -153,7 +173,7 @@ int main(int argc, char *argv[]) {
     int ret;
     char *current_region = NULL;
 
-    while ((ret = read_gene_region(gene_regions_in, &gene)) == 0) {
+    while ((ret = gene_region_reader_next(gene_regions_in, &gene)) == EXIT_SUCCESS) {
         if (current_region == NULL || strncmp(gene.chrom, current_region, FIELD_MAX_LEN) != 0) {
             Contig contig = { .n_regions = 0, .region_start = ref.n_genes, .name_start = ref.contig_names_len};
             reference_add_contig(contig, gene.chrom, &ref);
@@ -172,11 +192,17 @@ int main(int argc, char *argv[]) {
 
     free(current_region);
 
+    if (ret == EXIT_FAILURE) return EXIT_FAILURE;
+
+    // Both inputs have now been read in full, so their fingerprints are final.
+    ref.fasta_digest = fasta_digest(fa_in);
+    ref.regions_digest = gene_region_reader_digest(gene_regions_in);
+
     log_info("Writing out binarized reference to: %s", output_path);
     reference_write(output_path, &ref);
     reference_free(&ref);
 
-    fclose(gene_regions_in);
+    gene_region_reader_close(gene_regions_in);
     fai_destroy(fa_in);
     destroy_models(models);
 

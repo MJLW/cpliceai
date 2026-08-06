@@ -10,7 +10,7 @@ repo_root() {
 }
 
 : "${FIXTURES_DIR:="$(repo_root)/tests/fixtures"}"
-: "${MODEL_DIR:="$(repo_root)/models"}"
+: "${MODEL_DIR:="$(repo_root)/models/onnx"}"
 : "${CPLICEAI_REFERENCE_BIN:="$(repo_root)/build/cpliceai_reference"}"
 : "${CPLICEAI_PREDICT_VARIANT_BIN:="$(repo_root)/build/cpliceai_predict_variant"}"
 : "${CPLICEAI_PREDICT_GENE_BIN:="$(repo_root)/build/cpliceai_predict_gene"}"

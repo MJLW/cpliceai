@@ -1,0 +1,4 @@
+##fileformat=VCFv4.2
+##contig=<ID=chrTest,length=2000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chrTest	1000	.	G	A,T	.	.	.

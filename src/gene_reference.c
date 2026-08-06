@@ -20,12 +20,16 @@ int gene_reference_init(GeneReference *gene) {
 }
 
 int gene_reference_update(const char *chr, const char *name, const faidx_t *fa, const Reference *reference, GeneReference *gene) {
-    if (gene->seq.s != NULL) { 
+    if (gene->seq.s != NULL) {
         free(gene->seq.s);
         gene->seq.s = NULL;
         gene->seq.l = 0;
         gene->seq.m = 0;
     }
+
+    // Callers cache on the name to skip reloading the same gene, so the name must not outlive
+    // the data it describes: on the failure paths below, seq is already freed.
+    gene->name[0] = '\0';
 
     // Find contig
     int contig_index = -1;
@@ -68,8 +72,13 @@ int gene_reference_update(const char *chr, const char *name, const faidx_t *fa, 
     uint64_t start = reference->gene_starts[gene_index];
     uint64_t end = reference->gene_ends[gene_index];
 
+    // end is exclusive; faidx_fetch_seq's range is inclusive, so it stops one base short.
     int seq_len;
-    char *seq = faidx_fetch_seq(fa, chr, (int) start, (int) end, &seq_len); 
+    char *seq = faidx_fetch_seq(fa, chr, (int) start, (int) end - 1, &seq_len);
+    if (seq == NULL) {
+        log_warn("Could not fetch %s:%lu-%lu from the reference fasta", chr, start, end);
+        return EXIT_FAILURE;
+    }
     seq[seq_len] = '\0';
 
     strncpy(gene->name, name, FIELD_MAX_LEN);
