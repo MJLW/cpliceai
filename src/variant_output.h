@@ -4,22 +4,25 @@
 #include <htslib/kstring.h>
 #include <htslib/vcf.h>
 
+#include "haplotype.h"
 #include "variant_input.h"
 
 /*
  * Writer for annotated variants. The output format always mirrors the input format: a VCF in
- * is the same VCF back with an INFO/SpliceAI annotation added, and a TSV in is the same
- * columns back with a SpliceAI column appended:
+ * is the same VCF back with INFO/SpliceAI, INFO/SpliceAI_HAP and INFO/SpliceAI_TOT added, and
+ * a TSV in is the same columns back with those three appended:
  *
- *     CHROM	POS	REF	ALT	SpliceAI
+ *     CHROM	POS	REF	ALT	GT	SpliceAI	SpliceAI_HAP	SpliceAI_TOT
  *
  * Converting between the two is deliberately not supported. VCF -> TSV would have to discard
  * ID, QUAL, FILTER, existing INFO, FORMAT and every genotype column, and TSV -> VCF would
- * have to invent a header the input never carried.
+ * have to invent a header the input never carried. GT is carried through in the TSV's fifth
+ * column so that an annotated file is still valid input, genotypes and all.
  *
  * Annotations are handed over per ALT allele; each writer joins them the way its format
- * expects. Both emit one output record per input record, so a multiallelic input row stays
- * one row and TSV output can be fed straight back in as TSV input.
+ * expects. One output record is written per record handed over - but not per record read: a
+ * variant whose genotype is heterozygous and unphased has no haplotype to be scored on, and
+ * the caller drops it rather than writing it out, unless --include-unphased says otherwise.
  */
 
 typedef struct VariantWriter VariantWriter;
@@ -37,15 +40,17 @@ int variant_writer_open(const char *path, const VariantReader *reader, VariantWr
 /*
  * variant_writer_write - Write one annotated record.
  *
- * annotations holds record->n_alt entries, one per ALT allele, each already holding that
- * allele's (possibly comma-joined, one per overlapping gene) annotation. Empty entries are
- * written as '.'; if every entry is empty the record is written without a SpliceAI
- * annotation at all. annotations may be NULL when there is nothing to report.
+ * Each of the three annotation arrays holds record->n_alt entries, one per ALT allele, each
+ * already holding that allele's annotation - comma-joined over the overlapping genes, and for
+ * the two haplotype fields over the copies the allele sits on as well. Empty entries are
+ * written as '.'; if every entry of a field is empty, that field is left off the record
+ * entirely. Any of the arrays may be NULL when there is nothing to report.
  *
  * Returns EXIT_SUCCESS on success, EXIT_FAILURE (having logged) otherwise.
  */
-int variant_writer_write(VariantWriter *writer, const VariantRecord *record,
-                         const kstring_t *annotations);
+int variant_writer_write(VariantWriter *writer, const HapRecord *record,
+                         const kstring_t *spliceai, const kstring_t *spliceai_hap,
+                         const kstring_t *spliceai_tot);
 
 void variant_writer_close(VariantWriter *writer);
 

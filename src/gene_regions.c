@@ -192,7 +192,7 @@ static void gene_list_push(GeneList *list, const Gene *gene) {
     list->genes[list->n++] = *gene;
 }
 
-int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest) {
+int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest, int64_t *longest) {
     GeneRegionReader *reader;
     if (gene_region_reader_open(path, &reader) != EXIT_SUCCESS) return EXIT_FAILURE;
 
@@ -203,6 +203,8 @@ int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest
         return EXIT_FAILURE;
     }
 
+    int64_t longest_span = 0;
+
     Gene gene;
     int ret;
     while ((ret = gene_region_reader_next(reader, &gene)) == EXIT_SUCCESS) {
@@ -210,9 +212,12 @@ int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest
         // htslib wants the first and last character of the name, not one past the end.
         char *chr = gene.chrom, *chr_end = chr + strlen(chr) - 1;
         regidx_push(gene_index, chr, chr_end, beg, end, &gene);
+
+        if (gene.tx_end - gene.tx_start > longest_span) longest_span = gene.tx_end - gene.tx_start;
     }
 
     if (digest != NULL) *digest = gene_region_reader_digest(reader);
+    if (longest != NULL) *longest = longest_span;
     gene_region_reader_close(reader);
 
     if (ret == EXIT_FAILURE) {

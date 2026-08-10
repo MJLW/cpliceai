@@ -11,10 +11,12 @@ your variants against it. Use `cpliceai_predict_variant` for a score per variant
 cpliceai_reference        <model_dir> <fasta> <regions> <output.bin>
 
 cpliceai_predict_variant  <variants> <reference_scores> <model_dir> <fasta> <regions> <output> \
-                          [--window-radius N] [--input-format vcf|tsv|auto]
+                          [--window-radius N] [--input-format vcf|tsv|auto] \
+                          [--include-unphased]
 
 cpliceai_predict_gene     <variants> <reference_scores> <model_dir> <fasta> <regions> <output> \
-                          [--input-format vcf|tsv|auto]
+                          [--input-format vcf|tsv|auto] [--include-unphased] \
+                          [--ref-hapalt-only]
 ```
 
 ### Example
@@ -53,9 +55,9 @@ identifies the *assembly*; it will not distinguish two builds that differ only i
 Both predict binaries read either a VCF/BCF or a TSV, plain or compressed:
 
 ```
-CHROM	POS	REF	ALT
-chrTest	1000	G	A
-chrTest	1500	C	G,GT
+CHROM	POS	REF	ALT	GT
+chrTest	1000	G	A	0|1
+chrTest	1500	C	G,GT	1|2
 ```
 
 `POS` is 1-based, `ALT` may list comma-separated alleles, and extra columns are ignored. The
@@ -63,38 +65,101 @@ header row is optional. Genes are taken from the regions file, so variants need 
 
 The format is detected from the file. If a VCF is not recognised, pass `--input-format vcf`.
 
+`GT` is optional and says which of the sample's two copies of the chromosome each allele sits
+on, which is what makes the haplotype scores below possible. A VCF supplies it as `FORMAT/GT`
+instead, and must carry exactly one sample — extract the one you want with
+`bcftools view -s <SAMPLE>` first. A file with no genotypes scores exactly as it always has.
+
+**Input must be sorted by position**, with each contig's variants contiguous. Haplotypes are
+assembled from a sliding window, so an out-of-order record would be silently left out of its
+neighbours' backgrounds; the run fails instead. `bcftools sort` if in doubt.
+
 ### Output
 
 `cpliceai_predict_variant` returns your input with the scores added, in the format you supplied:
-a VCF gains an `INFO/SpliceAI` field, a TSV gains a `SpliceAI` column. Everything else in the
-file is left alone, so the output can be fed into another run.
+a VCF gains `INFO/SpliceAI`, `INFO/SpliceAI_HAP` and `INFO/SpliceAI_TOT`; a TSV gains the same
+three as columns. Everything else in the file is left alone, so the output can be fed into
+another run.
 
 ```
-CHROM	POS	REF	ALT	SpliceAI
-chrTest	1000	G	A	A|GENE1|0.12|0.00|0.03|0.41|-2|-8|21|-5
+CHROM	POS	REF	ALT	GT	SpliceAI	SpliceAI_HAP	SpliceAI_TOT
+chrTest	1000	G	A	0|1	A|GENE1|0.12|0.00|0.03|0.41|-2|-8|21|-5	A|GENE1|2|0.02|0.00|0.01|0.09|-2|-8|21|-5	A|GENE1|2|0.14|0.00|0.03|0.63|-2|-8|21|-5
 ```
 
 Each entry reads `ALLELE|SYMBOL|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL`: four delta
 scores (acceptor gain/loss, donor gain/loss) and the position of each, relative to the variant.
-There is one entry per alternate allele per gene, comma-separated, and `.` where a variant was
-skipped. `--window-radius` sets how far either side of the variant is scored (default 500).
+The two haplotype fields carry a `HAP` after `SYMBOL` naming the copy they were computed on.
+There is one entry per alternate allele per gene — and for the haplotype fields, per copy the
+allele sits on — comma-separated, with `.` where a variant was skipped. `--window-radius` sets
+how far either side of the variant is scored (default 500).
+
+The three differ only in what is compared against what:
+
+| Field | Comparison | Reads as |
+|---|---|---|
+| `SpliceAI` | `REF` → `ALT` | the variant on its own, against the reference genome |
+| `SpliceAI_HAP` | `HAP_REF` → `HAP_ALT` | the variant against the rest of its own copy |
+| `SpliceAI_TOT` | `REF` → `HAP_ALT` | that whole copy, against the reference genome |
+
+where `HAP_REF` is the copy of the chromosome the variant sits on carrying every *other*
+co-phased variant but not this one, and `HAP_ALT` is that same copy complete. So `SpliceAI` says
+what the variant would do by itself, `SpliceAI_HAP` what it adds to the molecule it is really
+on, and `SpliceAI_TOT` what that molecule does altogether. A variant whose neighbour has already
+abolished a splice site scores high on `SpliceAI_TOT` and low on `SpliceAI_HAP`.
+
+With no genotype in the input there is no copy to speak of: `HAP_REF` is the reference genome
+and `HAP_ALT` is the variant alone, so all three fields carry the same numbers with `.` for the
+`HAP`, and the two extra predictions are reused rather than recomputed — an unphased run costs
+what it always did. A phased variant costs three predictions where it used to cost one.
+
+#### Genotypes and phasing
+
+| Genotype | Treated as |
+|---|---|
+| `0\|1`, `1\|0`, `1\|1` | phased; scored on the copy or copies named |
+| `1/1` | on both copies — a homozygous call needs no phasing to be placed |
+| `0/1`, `1/0` | phase unknown; **dropped entirely** unless `--include-unphased` |
+| `0/0`, `0\|0` | sample carries no alternate allele; written through unscored |
+| `./.`, `.`, absent | no genotype; scored as a lone variant, as above |
+| `1` (haploid) | one copy, which is all the sample has |
+
+`--include-unphased` scores an unphased heterozygote greedily on **both** copies, and puts it
+into the background of its neighbours on both. That is a guess, which is why it is off by
+default: without it, every haplotype number in the output is backed by real phasing.
+
+**Phase sets are not consulted.** Every phased variant in a gene is treated as belonging to one
+pair of haplotypes. Where a gene spans more than one phase block, those blocks' orientations
+were assigned independently by the phasing tool and nothing here can pair them up, so variants
+from different blocks may be combined onto a copy they were never observed on together. This
+matters most for short-read read-backed phasing, where blocks are a few kb and a gene routinely
+spans several; chromosome-wide statistical or trio phasing is unaffected.
 
 A variant is scored against a gene only if it falls **entirely** inside it. A deletion anchored
 near the end of a gene but reaching past it is reported as `.`, since there is no reference
 sequence beyond the boundary to compare the alternate against. Variants longer than
 `--window-radius` are reported the same way.
 
-`cpliceai_predict_gene` writes a score table instead, one block per variant, listing every
-position in the gene where the reference or the alternate crosses a low threshold:
+`cpliceai_predict_gene` writes a score table instead, one block per variant per copy, listing
+every position in the gene where any of the four sequences crosses a low threshold:
 
 ```
-#GENE1_+_0_2000:chrTest_1000_G_A
-112	0.000000	0.630000	0.000000	0.620000
-679	0.340000	0.000000	0.380000	0.000000
+#GENE1_+_0_2000:chrTest_1000_G_A:HAP2
+112	0.000000	0.630000	0.000000	0.620000	0.000000	0.610000	0.000000	0.590000
+679	0.340000	0.000000	0.380000	0.000000	0.350000	0.000000	0.390000	0.000000
 ```
 
-The block header names the gene, strand and span, then the variant. Each row is a position
-followed by its reference acceptor and donor scores, then the same two for the alternate.
+The block header names the gene, strand and span, then the variant, then the copy (`HAP.` when
+the variant has no genotype). Each row is a position followed by an acceptor and donor score for
+each of `REF`, `ALT`, `HAP_REF` and `HAP_ALT`, in that order — the same four sequences the three
+`predict_variant` fields are computed from.
+
+`--ref-hapalt-only` keeps just the `REF` and `HAP_ALT` pairs, which is what the gene actually
+looks like on the reference and on this sample's copy, without the isolated-variant working:
+
+```
+#GENE1_+_0_2000:chrTest_1000_G_A:HAP2
+112	0.000000	0.630000	0.000000	0.590000
+```
 
 ## Inference backend
 
@@ -208,8 +273,9 @@ cmake --build build --target check   # equivalent to: cd build && make check
 ```
 
 `ctest --test-dir build -L cli` runs just the fast argument-parsing tests; `-L e2e` runs the full
-pipeline test plus `tests/cross_format.bats` (which asserts the same variant scores identically
-whether it arrives as VCF or TSV). Both load the real SpliceAI models against a small synthetic
+pipeline test plus `tests/input_formats.bats` (which asserts the same variant scores identically
+whether it arrives as VCF or TSV) and `tests/haplotype.bats` (phased genotypes, across both
+binaries and both formats). Both labels load the real SpliceAI models against a small synthetic
 fixture (`tests/fixtures/`) and take tens of seconds.
 
 Requires `bats-core` on `PATH`; installed in `.devcontainer/Dockerfile`, or install it yourself

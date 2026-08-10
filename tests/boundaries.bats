@@ -37,7 +37,7 @@ score() {
         "$FIXTURES_DIR/$REGIONS" \
         "$TEST_TMPDIR/one.out"
     [ "$status" -eq 0 ]
-    tail -n +2 "$TEST_TMPDIR/one.out" | cut -f5
+    tail -n +2 "$TEST_TMPDIR/one.out" | cut -f6
 }
 
 @test "a SNV on the first or last base of a gene is scored" {

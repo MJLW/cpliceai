@@ -80,7 +80,12 @@ add_library(range STATIC src/range.c)
 add_library(gene_regions STATIC src/gene_regions.c)
 add_library(reference STATIC src/reference.c)
 add_library(gene_reference STATIC src/gene_reference.c)
+# gene_reference_predict runs the model over a gene, so it sits on top of the inference backend
+# and the sequence helpers rather than beside them. Declared so the static link order follows.
+target_link_libraries(gene_reference PUBLIC predict utils)
 add_library(variant_io STATIC src/variant_input.c src/variant_output.c)
+add_library(haplotype STATIC src/haplotype.c)
+target_link_libraries(haplotype PUBLIC utils logging)
 
 set(CPLICEAI_COMMON_LIBS logging predict utils range gene_regions reference)
 
@@ -96,6 +101,7 @@ target_link_libraries(cpliceai_predict_variant PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
     variant_io
+    haplotype
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -104,6 +110,7 @@ target_link_libraries(cpliceai_predict_gene PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
     variant_io
+    haplotype
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -173,6 +180,14 @@ set_tests_properties(input_formats PROPERTIES
     LABELS "e2e"
     TIMEOUT 900)
 
+# Haplotype assembly from phased genotypes, across both binaries and both input formats.
+add_test(NAME haplotype
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/haplotype.bats)
+set_tests_properties(haplotype PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 900)
+
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     add_test(NAME chunking_parity
         COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/chunking_parity.bats)
@@ -209,6 +224,7 @@ add_library(libcpliceai SHARED
     src/gene_reference.c
     src/variant_input.c
     src/variant_output.c
+    src/haplotype.c
     src/logging/log.c)
 target_include_directories(libcpliceai PUBLIC src/)
 target_include_directories(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_INCLUDE_DIRS})

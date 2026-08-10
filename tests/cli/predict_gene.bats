@@ -32,3 +32,9 @@ load '../lib/common'
     [ "$status" -ne 0 ]
     [[ "$output" == *"input format"* ]]
 }
+
+@test "cpliceai_predict_gene documents its haplotype flags" {
+    run "$CPLICEAI_PREDICT_GENE_BIN" -h
+    [[ "$output" == *"--include-unphased"* ]]
+    [[ "$output" == *"--ref-hapalt-only"* ]]
+}

@@ -102,13 +102,14 @@ load 'lib/common'
     [[ "$output" == *"##INFO=<ID=SpliceAI,"* ]]
 
     # Delta scores (DS_AG|DS_AL|DS_DG|DS_DL) to 2dp, already %.2f-formatted by
-    # cpliceai_predict_variant itself.
-    run bash -c "bcftools view -H '$output_vcf' | cut -f8 | sed 's/^SpliceAI=//' | awk -F'|' '{printf \"%s|%s|%s|%s\", \$3, \$4, \$5, \$6}'"
+    # cpliceai_predict_variant itself. Asked for by tag: INFO also carries SpliceAI_HAP and
+    # SpliceAI_TOT, which for a variant with no genotype repeat these same numbers.
+    run bash -c "bcftools query -f '%INFO/SpliceAI\n' '$output_vcf' | awk -F'|' '{printf \"%s|%s|%s|%s\", \$3, \$4, \$5, \$6}'"
     [ "$status" -eq 0 ]
     [ "$output" = "0.01|0.00|0.16|0.63" ]
 
     # The donor loss is located one base upstream of the variant, at the site it destroyed.
-    run bash -c "bcftools view -H '$output_vcf' | cut -f8 | sed 's/^SpliceAI=//' | awk -F'|' '{print \$10}'"
+    run bash -c "bcftools query -f '%INFO/SpliceAI\n' '$output_vcf' | awk -F'|' '{print \$10}'"
     [ "$output" = "-1" ]
 }
 
@@ -137,8 +138,9 @@ load 'lib/common'
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 
-    # At least one data row: <pos>\t<ref_acceptor>\t<ref_donor>\t<alt_acceptor>\t<alt_donor>
-    run bash -c "grep -v '^#' '$output_tsv' | awk -F'\t' 'NF==5' | wc -l"
+    # At least one data row: <pos> then an acceptor/donor pair for each of REF, ALT, HAP_REF
+    # and HAP_ALT.
+    run bash -c "grep -v '^#' '$output_tsv' | awk -F'\t' 'NF==9' | wc -l"
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 

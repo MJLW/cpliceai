@@ -32,3 +32,23 @@ load '../lib/common'
     [ "$status" -ne 0 ]
     [[ "$output" == *"input format"* ]]
 }
+
+@test "cpliceai_predict_variant documents its haplotype flag" {
+    run "$CPLICEAI_PREDICT_VARIANT_BIN" -h
+    [[ "$output" == *"--include-unphased"* ]]
+}
+
+# Also before load_models: genotypes are read from one sample, and choosing between several
+# silently would be a wrong answer with no outward sign.
+@test "cpliceai_predict_variant rejects a multi-sample VCF before loading models" {
+    run "$CPLICEAI_PREDICT_VARIANT_BIN" \
+        "$FIXTURES_DIR/variants.multisample.vcf" \
+        "does-not-exist.bin" \
+        "/nonexistent-model-dir" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.tsv" \
+        "$TEST_TMPDIR/unused.vcf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"2 samples"* ]]
+    [[ "$output" == *"bcftools view -s"* ]]
+}
