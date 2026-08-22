@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     libbz2-dev \
     liblzma-dev \
+    check \
     && rm -rf /var/lib/apt/lists/*
 
 # htslib (VCF/BAM/FASTA access), providing htslib.pc for CMakeLists.txt.

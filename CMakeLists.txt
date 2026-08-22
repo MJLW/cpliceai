@@ -17,6 +17,15 @@ find_package(Sanitizers)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
+# Check (https://libcheck.github.io/check/), for unit tests that call into haplotype.c/utils.c
+# directly rather than through a compiled binary. Optional, like bats-core below: a plain build
+# of the three binaries should not require a test framework nobody asked to install.
+pkg_check_modules(CHECK check)
+if(NOT CHECK_FOUND)
+    message(WARNING "check not found -- unit tests will be unavailable. "
+        "Install it (e.g. apt-get install check) to enable them.")
+endif()
+
 # Inference backend: ONNX Runtime (default, supports GPU via CUDA/TensorRT execution
 # providers) or TensorFlow (kept buildable for parity testing against the ONNX Runtime
 # migration; see tests/backend_parity.bats). Neither backend's headers leak into predict.h
@@ -118,6 +127,33 @@ foreach(cpliceai_target cpliceai_reference cpliceai_predict_variant cpliceai_pre
     add_sanitizers(${cpliceai_target})
 endforeach()
 
+# Unit tests (Check), wired into CTest and `make check`. These call into haplotype.c/utils.c
+# directly -- no model, no CLI binary, no fixture files on disk beyond what a test writes to a
+# temp directory itself -- so they run in a fraction of a second each, unlike the bats suites
+# below which load real models.
+set(CPLICEAI_UNIT_TEST_DEPS "")
+if(CHECK_FOUND)
+    add_executable(test_seqedit tests/unit/test_seqedit.c)
+    target_include_directories(test_seqedit PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
+    target_link_libraries(test_seqedit PRIVATE utils logging ${CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+    target_link_directories(test_seqedit PRIVATE ${CHECK_LIBRARY_DIRS})
+    add_sanitizers(test_seqedit)
+
+    add_executable(test_haplotype_buffer tests/unit/test_haplotype_buffer.c)
+    target_include_directories(test_haplotype_buffer PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
+    target_link_libraries(test_haplotype_buffer PRIVATE haplotype variant_io gene_regions utils logging
+        ${CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+    target_link_directories(test_haplotype_buffer PRIVATE ${CHECK_LIBRARY_DIRS})
+    add_sanitizers(test_haplotype_buffer)
+
+    foreach(unit_test test_seqedit test_haplotype_buffer)
+        add_test(NAME unit_${unit_test} COMMAND ${unit_test})
+        set_tests_properties(unit_${unit_test} PROPERTIES LABELS "unit" TIMEOUT 30)
+    endforeach()
+
+    set(CPLICEAI_UNIT_TEST_DEPS test_seqedit test_haplotype_buffer)
+endif()
+
 # End-to-end tests (bats-core), wired into CTest and `make check`. Optional: a plain build of
 # the three binaries should not require a test runner nobody asked to install.
 find_program(BATS_EXECUTABLE bats)
@@ -217,11 +253,11 @@ set_tests_properties(backend_parity PROPERTIES
     LABELS "parity"
     TIMEOUT 120)
 
+endif() # BATS_EXECUTABLE
+
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
-
-endif() # BATS_EXECUTABLE
+    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene ${CPLICEAI_UNIT_TEST_DEPS})
 
 # Shared library
 add_library(libcpliceai SHARED

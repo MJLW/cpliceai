@@ -66,6 +66,12 @@ part() {
     awk -F'|' -v i="$2" '{ print $i }' <<< "$1"
 }
 
+# base_at <1-based pos> [length] - the reference base(s) there, so a hand-built fixture never
+# disagrees with the fasta.
+base_at() {
+    awk -v p="$1" -v n="${2:-1}" 'NR>1{s=s$0} END{print substr(s,p,n)}' "$FIXTURES_DIR/chrTest.fasta"
+}
+
 @test "a variant with no genotype scores the same on all three fields" {
     build_reference
 
@@ -283,4 +289,158 @@ part() {
     predict_variant "$TEST_TMPDIR/unsorted.tsv" "$TEST_TMPDIR/unsorted.out.tsv"
     [ "$status" -ne 0 ]
     [[ "$output" == *"sorted"* ]]
+}
+
+@test "co-phased variants that overlap each other score as if isolated, with a warning" {
+    build_reference
+
+    # chrTest:101 GCT>A spans [101,103], chrTest:102 C>T sits inside that span: two edits can
+    # never both replace the same base. Whichever one is being scored, the other overlaps the
+    # space its own REF span needs, so each ends up with an empty background - not a corrupted
+    # one - and a warning is logged for both.
+    predict_variant "$FIXTURES_DIR/variants.overlap.tsv" "$TEST_TMPDIR/out.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"overlaps"* ]]
+
+    local pos
+    for pos in 101 102; do
+        local isolated marginal total
+        isolated="$(field "$TEST_TMPDIR/out.tsv" "$pos" SpliceAI)"
+        marginal="$(field "$TEST_TMPDIR/out.tsv" "$pos" SpliceAI_HAP)"
+        total="$(field "$TEST_TMPDIR/out.tsv" "$pos" SpliceAI_TOT)"
+
+        [ "$(cut -d'|' -f4- <<< "$marginal")" = "$(cut -d'|' -f3- <<< "$isolated")" ]
+        [ "$(cut -d'|' -f4- <<< "$total")" = "$(cut -d'|' -f3- <<< "$isolated")" ]
+    done
+}
+
+@test "a genotype naming more than two copies uses only the first two" {
+    build_reference
+
+    # chrTest:113 is 0|1|1 - three copies. Only the first two are read, so this must score
+    # exactly like the ordinary 0|1 case (variants.phased.vcf's first record), not like a
+    # variant present on both copies. The fixture is a VCF, so its output is too - read it back
+    # with bcftools rather than the TSV-column field()/part() helpers.
+    predict_variant "$FIXTURES_DIR/variants.triploid.vcf" "$TEST_TMPDIR/out.vcf"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"3-ploid"* ]]
+
+    run bash -c "bcftools query -f '%INFO/SpliceAI_HAP\n' '$TEST_TMPDIR/out.vcf'"
+    [ "$status" -eq 0 ]
+    [ "$(awk -F, '{print NF}' <<< "$output")" -eq 1 ]
+    [ "$(part "$output" 3)" = "2" ]
+    [ "$(part "$output" 7)" = "0.63" ]
+}
+
+@test "a multiallelic record's genotype scores each ALT on its named copy" {
+    build_reference
+
+    # chrTest:1000 G>A,T is 1|2: A sits on copy 1 alone, T on copy 2 alone. chrTest:1010 C>G is
+    # 0|1, co-phased with T's copy only. So A's background is empty (its HAP field matches its
+    # isolated score exactly) while T's is not.
+    predict_variant "$FIXTURES_DIR/variants.multiallelic.phased.tsv" "$TEST_TMPDIR/out.tsv"
+    [ "$status" -eq 0 ]
+
+    local isolated marginal
+    isolated="$(field "$TEST_TMPDIR/out.tsv" 1000 SpliceAI)"
+    marginal="$(field "$TEST_TMPDIR/out.tsv" 1000 SpliceAI_HAP)"
+
+    local isolated_a isolated_t marginal_a marginal_t
+    isolated_a="$(cut -d, -f1 <<< "$isolated")"
+    isolated_t="$(cut -d, -f2 <<< "$isolated")"
+    marginal_a="$(cut -d, -f1 <<< "$marginal")"
+    marginal_t="$(cut -d, -f2 <<< "$marginal")"
+
+    [ "$(part "$marginal_a" 3)" = "1" ]
+    [ "$(part "$marginal_t" 3)" = "2" ]
+    [ "$(cut -d'|' -f4- <<< "$marginal_a")" = "$(cut -d'|' -f3- <<< "$isolated_a")" ]
+    [ "$(cut -d'|' -f4- <<< "$marginal_t")" != "$(cut -d'|' -f3- <<< "$isolated_t")" ]
+}
+
+@test "an oversized indel is skipped for its own report but still enters a phased neighbour's background" {
+    build_reference
+
+    # 600 bases, one more than the default --window-radius of 500: predict_variant refuses to
+    # score it directly (see boundaries.bats), but hap_edits_collect has no window_radius limit
+    # of its own, so the buffered variant can still be pulled into a nearby phased neighbour's
+    # background even though its own row comes back unscored.
+    local big
+    big="$(base_at 700 600)"
+    printf 'CHROM\tPOS\tREF\tALT\tGT\nchrTest\t113\tG\tA\t0|1\nchrTest\t700\t%s\t%s\t0|1\n' \
+        "$big" "${big:0:1}" > "$TEST_TMPDIR/oversized.tsv"
+
+    predict_variant "$TEST_TMPDIR/oversized.tsv" "$TEST_TMPDIR/oversized.out.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Oversized indel"* ]]
+
+    [ "$(field "$TEST_TMPDIR/oversized.out.tsv" 700 SpliceAI)" = "." ]
+
+    local isolated marginal
+    isolated="$(field "$TEST_TMPDIR/oversized.out.tsv" 113 SpliceAI)"
+    marginal="$(field "$TEST_TMPDIR/oversized.out.tsv" 113 SpliceAI_HAP)"
+    [ "$(cut -d'|' -f4- <<< "$marginal")" != "$(cut -d'|' -f3- <<< "$isolated")" ]
+}
+
+@test "a variant outside the gene does not enter a neighbour's haplotype background" {
+    run "$CPLICEAI_REFERENCE_BIN" \
+        "$MODEL_DIR" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.interior.tsv" \
+        "$TEST_TMPDIR/reference.interior.bin"
+    [ "$status" -eq 0 ]
+
+    # GENE2 is 0-based [500,1500), i.e. 1-based POS 501-1500. POS 500 sits one base outside it,
+    # co-phased with the first base inside.
+    local outside inside
+    outside="$(base_at 500)"
+    inside="$(base_at 501)"
+    printf 'CHROM\tPOS\tREF\tALT\tGT\nchrTest\t500\t%s\tT\t0|1\nchrTest\t501\t%s\tT\t0|1\n' \
+        "$outside" "$inside" > "$TEST_TMPDIR/boundary.tsv"
+
+    run "$CPLICEAI_PREDICT_VARIANT_BIN" \
+        "$TEST_TMPDIR/boundary.tsv" \
+        "$TEST_TMPDIR/reference.interior.bin" \
+        "$MODEL_DIR" \
+        "$FIXTURES_DIR/chrTest.fasta" \
+        "$FIXTURES_DIR/regions.interior.tsv" \
+        "$TEST_TMPDIR/boundary.out.tsv"
+    [ "$status" -eq 0 ]
+
+    # The out-of-gene variant is written through unscored...
+    [ "$(field "$TEST_TMPDIR/boundary.out.tsv" 500 SpliceAI)" = "." ]
+
+    # ...and, despite being co-phased, never reaches the in-gene neighbour's background: the
+    # gene bounds clamp hap_edits_collect's search range before phasing even comes into it.
+    local isolated marginal total
+    isolated="$(field "$TEST_TMPDIR/boundary.out.tsv" 501 SpliceAI)"
+    marginal="$(field "$TEST_TMPDIR/boundary.out.tsv" 501 SpliceAI_HAP)"
+    total="$(field "$TEST_TMPDIR/boundary.out.tsv" 501 SpliceAI_TOT)"
+    [ "$(cut -d'|' -f4- <<< "$marginal")" = "$(cut -d'|' -f3- <<< "$isolated")" ]
+    [ "$(cut -d'|' -f4- <<< "$total")" = "$(cut -d'|' -f3- <<< "$isolated")" ]
+}
+
+@test "phase sets are not consulted" {
+    build_reference
+
+    # Two variants tagged with different FORMAT/PS values, phased 0|1 relative to each other.
+    # Phase-set-aware tooling would treat them as independently phased and refuse to combine
+    # them; this tool never reads PS, so they are still paired as one haplotype. This test exists
+    # so that starting to honour PS is a deliberate, visible change here, not a silent one (see
+    # the README's phase-set caveat).
+    cat > "$TEST_TMPDIR/ps.vcf" <<'VCF'
+##fileformat=VCFv4.2
+##contig=<ID=chrTest,length=2000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1
+chrTest	113	.	G	A	.	.	.	GT:PS	0|1:100
+chrTest	130	.	G	C	.	.	.	GT:PS	0|1:200
+VCF
+
+    predict_variant "$TEST_TMPDIR/ps.vcf" "$TEST_TMPDIR/ps.out.vcf"
+    [ "$status" -eq 0 ]
+
+    run bash -c "bcftools query -f '%POS\t%INFO/SpliceAI_TOT\n' '$TEST_TMPDIR/ps.out.vcf' | awk -F'\t' '\$1==130'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0.63"* ]]
 }

@@ -52,3 +52,18 @@ load '../lib/common'
     [[ "$output" == *"2 samples"* ]]
     [[ "$output" == *"bcftools view -s"* ]]
 }
+
+# Checked before even opening the variants file: the flag hard-errors rather than silently
+# doing nothing, which is what it used to do.
+@test "cpliceai_predict_variant rejects --splice-output" {
+    run "$CPLICEAI_PREDICT_VARIANT_BIN" \
+        "does-not-exist.vcf" \
+        "does-not-exist.bin" \
+        "/nonexistent-model-dir" \
+        "does-not-exist.fasta" \
+        "does-not-exist.tsv" \
+        "$TEST_TMPDIR/unused.vcf" \
+        --splice-output "$TEST_TMPDIR/unused-splice.tsv"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not yet implemented"* ]]
+}

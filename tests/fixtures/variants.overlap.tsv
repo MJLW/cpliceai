@@ -1,0 +1,3 @@
+CHROM	POS	REF	ALT	GT
+chrTest	101	GCT	A	0|1
+chrTest	102	C	T	0|1
