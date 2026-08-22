@@ -1,11 +1,66 @@
 # CpliceAI
 
+CpliceAI is a C implementation of SpliceAI (splice-effect prediction from sequence), running on
+ONNX Runtime with CPU and GPU inference, plus haplotype-aware scoring for phased variants.
+
+## Installation
+
+### Docker / devcontainer (recommended)
+
+CPU by default:
+
+```sh
+docker build -f .devcontainer/Dockerfile .
+```
+
+GPU (CUDA 12.8 + cuDNN 9.x; needs an NVIDIA GPU, driver, and `nvidia-container-toolkit` on the
+host — see [Building for GPU](#building-for-gpu) below for details):
+
+```sh
+docker build --build-arg VARIANT=gpu -f .devcontainer/Dockerfile .
+```
+
+Opening `.devcontainer/` in VS Code (or another devcontainer-aware editor) does the same CPU build
+by default; it works without a GPU.
+
+### Manual build
+
+Prerequisites: `build-essential`, `cmake`, `pkg-config`, and:
+
+- **htslib** 1.24 (VCF/BAM/FASTA access), built from source — there's no package-manager version
+  new enough on most distros:
+  ```sh
+  curl -fsSL https://github.com/samtools/htslib/releases/download/1.24/htslib-1.24.tar.bz2 -o htslib.tar.bz2
+  tar -xjf htslib.tar.bz2 && cd htslib-1.24
+  ./configure && make -j && sudo make install && cd ..
+  ```
+- **ONNX Runtime** 1.28.0 — `scripts/install_onnxruntime.sh` (CPU by default; pass `cuda12` or
+  `cuda13` for a GPU build, see [Building for GPU](#building-for-gpu)):
+  ```sh
+  ./scripts/install_onnxruntime.sh
+  ```
+- **bats-core**, optional, only needed for `cmake --build build --target check` (see
+  [Testing](#testing)) — install from https://github.com/bats-core/bats-core, or skip it and CMake
+  will configure without it.
+
+Then build:
+
+```sh
+cmake -S . -B build
+cmake --build build -j
+```
+
+This produces `build/cpliceai_reference`, `build/cpliceai_predict_variant`, and
+`build/cpliceai_predict_gene`. Both htslib and ONNX Runtime install to `/usr/local`/`/opt` by
+default; if `pkg-config` can't find ONNX Runtime, pass `-DONNXRUNTIME_ROOT=/opt/onnxruntime` when
+configuring.
+
 ## Usage
 
-CpliceAI scores how a variant affects splicing. There are three binaries. `cpliceai_reference`
-scores the unaltered genome once and saves the result; the two predict binaries then compare
-your variants against it. Use `cpliceai_predict_variant` for a score per variant, and
-`cpliceai_predict_gene` for a score at every position of the gene a variant falls in.
+There are three binaries. `cpliceai_reference` scores the unaltered genome once and saves the
+result; the two predict binaries then compare your variants against it. Use
+`cpliceai_predict_variant` for a score per variant, and `cpliceai_predict_gene` for a score at
+every position of the gene a variant falls in.
 
 ```
 cpliceai_reference        <model_dir> <fasta> <regions> <output.bin>
@@ -18,6 +73,9 @@ cpliceai_predict_gene     <variants> <reference_scores> <model_dir> <fasta> <reg
                           [--input-format vcf|tsv|auto] [--include-unphased] \
                           [--ref-hapalt-only]
 ```
+
+`cpliceai_predict_variant` also accepts `--splice-output <file>`, reserved for a not-yet-implemented
+sparse per-position output; passing it currently exits with an error rather than doing anything.
 
 ### Example
 
@@ -186,8 +244,8 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 #### GPU performance A/B knobs (CUDA EP)
 
-Forwarded to ORT only when set, so leaving them unset keeps ONNX Runtime's own defaults. Added
-for the investigation in `docs/gpu-validation.md`; none has a proven-best value for this model yet.
+Forwarded to ORT only when set, so leaving them unset keeps ONNX Runtime's own defaults; none has
+a proven-best value for this model yet.
 
 | Variable | ORT provider option | Purpose |
 |---|---|---|
@@ -209,13 +267,12 @@ opt-in rather than the default. The CUDA/cuDNN *runtime* has to come from the ba
 `nvidia-container-toolkit` only injects the host's driver (`libcuda.so`), not `libcudart`/cuDNN.
 
 Not using Docker at all? Install CUDA 12.8 + cuDNN 9 directly, then run
-`scripts/install_onnxruntime_gpu.sh` (or unpack the GPU release tarball yourself) and set
-`ONNXRUNTIME_ROOT=/opt/onnxruntime` when configuring CMake.
+`scripts/install_onnxruntime.sh cuda12` (`cuda13` for CUDA 13.0 + cuDNN 9.x instead; or unpack the
+GPU release tarball yourself) and set `ONNXRUNTIME_ROOT=/opt/onnxruntime` when configuring CMake.
 
-Once you have a GPU build, see **[`docs/gpu-validation.md`](docs/gpu-validation.md)** for the
-validation checklist (confirming the CUDA EP actually engages, fp32/fp16 accuracy parity,
-benchmarking against the CPU baselines already recorded there, and a known perf caveat worth
-reading before drawing conclusions from the numbers).
+To confirm the CUDA execution provider is actually engaged, look for `active: CUDAExecutionProvider`
+in the startup log printed by any of the three binaries; `CPLICEAI_ORT_LOG_SEVERITY=0` (see the
+environment variable table above) goes further and prints per-node execution-provider placement.
 
 ### Model formats
 
@@ -264,11 +321,10 @@ fp32-vs-fp16 comparison is reported but not asserted.
 ## Testing
 
 End-to-end tests for `cpliceai_reference`, `cpliceai_predict_variant`, and `cpliceai_predict_gene`
-live under `tests/` as bats-core scripts, wired into CTest and a `check` target:
+live under `tests/` as bats-core scripts, wired into CTest and a `check` target. After the
+`cmake -S . -B build && cmake --build build -j` from [Installation](#manual-build):
 
 ```
-cmake -S . -B build
-cmake --build build -j
 cmake --build build --target check   # equivalent to: cd build && make check
 ```
 
@@ -278,6 +334,6 @@ whether it arrives as VCF or TSV) and `tests/haplotype.bats` (phased genotypes, 
 binaries and both formats). Both labels load the real SpliceAI models against a small synthetic
 fixture (`tests/fixtures/`) and take tens of seconds.
 
-Requires `bats-core` on `PATH`; installed in `.devcontainer/Dockerfile`, or install it yourself
-from https://github.com/bats-core/bats-core. The test helpers only use `setup`/`teardown` and
-`run` (no `setup_file`/`BATS_FILE_TMPDIR`), so any reasonably recent bats-core works.
+Requires `bats-core` on `PATH` (see [Installation](#manual-build)). The test helpers only use
+`setup`/`teardown` and `run` (no `setup_file`/`BATS_FILE_TMPDIR`), so any reasonably recent
+bats-core works.

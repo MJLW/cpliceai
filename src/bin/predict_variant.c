@@ -30,7 +30,7 @@
 #define OPTIONAL_ARGS \
     OPTIONAL_INT_ARG(window_radius, 500, "--window-radius", "bases", "Bases scored either side of the variant") \
     OPTIONAL_STRING_ARG(input_format, "auto", "--input-format", "vcf|tsv|auto", "Format of the variants file. Detected from the file itself by default") \
-    OPTIONAL_STRING_ARG(splice_output, "\0", "--splice-output", "file", "Output TSV with sparse splice predictions per variant")
+    OPTIONAL_STRING_ARG(splice_output, "\0", "--splice-output", "file", "Not yet implemented. Output TSV with sparse splice predictions per variant.")
 
 #define BOOLEAN_ARGS \
     BOOLEAN_ARG(include_unphased, "--include-unphased", "Score heterozygous variants whose phase is unknown, placing them on both haplotypes") \
@@ -298,7 +298,10 @@ int main(int argc, char *argv[]) {
     const int window_radius = args.window_radius;
     const char *prediction_output = args.splice_output;
     const bool produce_splice_output = prediction_output[0] != '\0';
-    (void) produce_splice_output; // --splice-output is parsed but not yet implemented
+    if (produce_splice_output) {
+        log_error("--splice-output is not yet implemented");
+        return EXIT_FAILURE;
+    }
 
     // Opened before load_models so a bad format value or unusable path fails cheaply.
     VariantFormat input_format;

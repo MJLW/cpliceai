@@ -118,8 +118,15 @@ foreach(cpliceai_target cpliceai_reference cpliceai_predict_variant cpliceai_pre
     add_sanitizers(${cpliceai_target})
 endforeach()
 
-# End-to-end tests (bats-core), wired into CTest and `make check`
-find_program(BATS_EXECUTABLE bats REQUIRED)
+# End-to-end tests (bats-core), wired into CTest and `make check`. Optional: a plain build of
+# the three binaries should not require a test runner nobody asked to install.
+find_program(BATS_EXECUTABLE bats)
+if(NOT BATS_EXECUTABLE)
+    message(WARNING "bats-core not found -- test targets (check, ctest) will be unavailable. "
+        "Install bats-core to enable them: https://github.com/bats-core/bats-core")
+endif()
+
+if(BATS_EXECUTABLE)
 
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     set(CPLICEAI_TEST_MODEL_DIR "${CMAKE_SOURCE_DIR}/models/onnx")
@@ -213,6 +220,8 @@ set_tests_properties(backend_parity PROPERTIES
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
     DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
+
+endif() # BATS_EXECUTABLE
 
 # Shared library
 add_library(libcpliceai SHARED

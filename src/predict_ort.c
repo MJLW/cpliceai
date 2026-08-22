@@ -92,11 +92,11 @@ static int ort_probe(const OrtApi *api, OrtStatus *status, const char *what) {
     return EXIT_FAILURE;
 }
 
-// Optional CUDA provider options, plumbed as env vars purely so the GPU-performance A/B matrix in
-// docs/gpu-validation.md can be run without rebuilding. Each is forwarded to ORT *only* when its
-// env var is set to a non-empty value, so leaving them unset keeps ORT's own defaults rather than
-// pinning a possibly-wrong choice here. Values are passed through verbatim (ORT validates them and
-// rejects unknown keys/values, confirmed against this build).
+// Optional CUDA provider options, plumbed as env vars purely so GPU-performance A/B comparisons
+// can be run without rebuilding. Each is forwarded to ORT *only* when its env var is set to a
+// non-empty value, so leaving them unset keeps ORT's own defaults rather than pinning a
+// possibly-wrong choice here. Values are passed through verbatim (ORT validates them and rejects
+// unknown keys/values, confirmed against this build).
 static const struct {
     const char *env;
     const char *key;

@@ -5,3 +5,7 @@ data/*
 benchmarks/*
 
 *.bin
+
+__pycache__/
+/results.bckp
+/spliceai_test.vcf
