@@ -10,6 +10,7 @@
 struct VariantWriter {
     VariantFormat format;
     char *path;
+    bool local_only;
 
     /* VCF: borrowed from the reader, never owned here. */
     htsFile *vcf;
@@ -32,7 +33,8 @@ static int variant_writer_open_vcf(VariantWriter *w, bcf_hdr_t *in_hdr) {
 
     const char *descriptions[] = { SPLICEAI_DESC, SPLICEAI_HAP_DESC, SPLICEAI_TOT_DESC };
     const char *tags[] = { SPLICEAI_TAG, SPLICEAI_HAP_TAG, SPLICEAI_TOT_TAG };
-    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+    const size_t n_tags = w->local_only ? 1 : sizeof(tags) / sizeof(tags[0]);
+    for (size_t i = 0; i < n_tags; i++) {
         if (bcf_hdr_append(w->hdr, descriptions[i]) != 0) {
             log_error("Failed to append description for tag %s to vcf header.", tags[i]);
             return EXIT_FAILURE;
@@ -52,13 +54,18 @@ static int variant_writer_open_tsv(VariantWriter *w) {
     if (w->tsv == NULL) return EXIT_FAILURE;
 
     /* The first five columns are exactly the input schema, so this output is valid input. */
-    fprintf(w->tsv, "CHROM\tPOS\tREF\tALT\tGT\t%s\t%s\t%s\n",
-            SPLICEAI_TAG, SPLICEAI_HAP_TAG, SPLICEAI_TOT_TAG);
+    if (w->local_only) {
+        fprintf(w->tsv, "CHROM\tPOS\tREF\tALT\tGT\t%s\n", SPLICEAI_TAG);
+    } else {
+        fprintf(w->tsv, "CHROM\tPOS\tREF\tALT\tGT\t%s\t%s\t%s\n",
+                SPLICEAI_TAG, SPLICEAI_HAP_TAG, SPLICEAI_TOT_TAG);
+    }
 
     return EXIT_SUCCESS;
 }
 
-int variant_writer_open(const char *path, const VariantReader *reader, VariantWriter **writer) {
+int variant_writer_open(const char *path, const VariantReader *reader, bool local_only,
+                        VariantWriter **writer) {
     VariantWriter *w = calloc(1, sizeof(VariantWriter));
     if (w == NULL) {
         log_fatal("Failed to allocate %zu bytes for variant writer", sizeof(VariantWriter));
@@ -67,6 +74,7 @@ int variant_writer_open(const char *path, const VariantReader *reader, VariantWr
 
     w->format = variant_reader_format(reader);
     w->path = strdup(path);
+    w->local_only = local_only;
 
     int ret = (w->format == VARIANT_FORMAT_VCF)
                   ? variant_writer_open_vcf(w, variant_reader_hdr(reader))
@@ -138,7 +146,8 @@ static int variant_writer_write_vcf(VariantWriter *w, const HapRecord *record,
 
     const kstring_t *fields[] = { spliceai, spliceai_hap, spliceai_tot };
     const char *tags[] = { SPLICEAI_TAG, SPLICEAI_HAP_TAG, SPLICEAI_TOT_TAG };
-    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+    const size_t n_tags = w->local_only ? 1 : sizeof(tags) / sizeof(tags[0]);
+    for (size_t i = 0; i < n_tags; i++) {
         if (join_annotations(record, fields[i], &w->buf)) {
             bcf_update_info_string(w->hdr, v, tags[i], w->buf.s);
         }
@@ -166,7 +175,8 @@ static int variant_writer_write_tsv(VariantWriter *w, const HapRecord *record,
     fprintf(w->tsv, "\t%s", w->buf.s);
 
     const kstring_t *fields[] = { spliceai, spliceai_hap, spliceai_tot };
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+    const size_t n_fields = w->local_only ? 1 : sizeof(fields) / sizeof(fields[0]);
+    for (size_t i = 0; i < n_fields; i++) {
         const bool annotated = join_annotations(record, fields[i], &w->buf);
         fprintf(w->tsv, "\t%s", annotated ? w->buf.s : ".");
     }

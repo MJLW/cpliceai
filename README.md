@@ -23,6 +23,45 @@ docker build --build-arg VARIANT=gpu -f .devcontainer/Dockerfile .
 Opening `.devcontainer/` in VS Code (or another devcontainer-aware editor) does the same CPU build
 by default; it works without a GPU.
 
+### Runtime image
+
+A separate `Dockerfile` at the repository root (distinct from the devcontainer above, which is
+for developing CpliceAI itself) builds a minimal image: just the three CLI binaries and the
+default ONNX models. Nothing else is bundled — a reference FASTA, a regions file, and a variants
+file all need to be supplied at run time (see [Usage](#usage) below).
+
+Build both a CPU and a GPU image (the default):
+
+```sh
+docker buildx bake
+```
+
+Build just one:
+
+```sh
+docker buildx bake cpu
+docker buildx bake gpu
+```
+
+Run it against files in the current directory:
+
+```sh
+docker run --rm -v "$PWD":/workspace cpliceai:cpu \
+    cpliceai_reference /opt/cpliceai/models/onnx GRCh37.fa data/grch37.tsv reference.bin
+```
+
+The GPU image needs the same NVIDIA GPU, driver, and `nvidia-container-toolkit` setup as the GPU
+devcontainer (see [Building for GPU](#building-for-gpu)), plus `--gpus all` on `docker run`:
+
+```sh
+docker run --rm --gpus all -v "$PWD":/workspace cpliceai:gpu \
+    cpliceai_predict_variant variants.vcf reference.bin /opt/cpliceai/models/onnx GRCh37.fa \
+    data/grch37.tsv annotated.vcf
+```
+
+The bundled models live at `/opt/cpliceai/models/onnx` rather than under `/workspace`, since
+anything bind-mounted there would otherwise hide them.
+
 ### Manual build
 
 Prerequisites: `build-essential`, `cmake`, `pkg-config`, and:
@@ -67,11 +106,11 @@ cpliceai_reference        <model_dir> <fasta> <regions> <output.bin>
 
 cpliceai_predict_variant  <variants> <reference_scores> <model_dir> <fasta> <regions> <output> \
                           [--window-radius N] [--input-format vcf|tsv|auto] \
-                          [--include-unphased]
+                          [--include-unphased] [--local]
 
 cpliceai_predict_gene     <variants> <reference_scores> <model_dir> <fasta> <regions> <output> \
                           [--input-format vcf|tsv|auto] [--include-unphased] \
-                          [--ref-hapalt-only]
+                          [--ref-hapalt-only] [--local]
 ```
 
 `cpliceai_predict_variant` also accepts `--splice-output <file>`, reserved for a not-yet-implemented
@@ -185,6 +224,15 @@ what it always did. A phased variant costs three predictions where it used to co
 into the background of its neighbours on both. That is a guess, which is why it is off by
 default: without it, every haplotype number in the output is backed by real phasing.
 
+`--local` ignores genotype and phasing altogether: every variant is scored on its own against
+the reference genome, exactly as if the input carried no `GT` at all. Nothing is ever dropped,
+no variant is ever split across copies, and no haplotype background is ever assembled — so
+`SpliceAI_HAP` and `SpliceAI_TOT` would always just repeat `SpliceAI`, and are left out of the
+output entirely instead: a VCF gets `INFO/SpliceAI` only, a TSV only the one extra column. The
+`GT` column itself is unaffected and still round-trips in the output; only its effect on scoring
+is turned off. Combining it with `--include-unphased` has no additional effect, since nothing is
+dropped either way.
+
 **Phase sets are not consulted.** Every phased variant in a gene is treated as belonging to one
 pair of haplotypes. Where a gene spans more than one phase block, those blocks' orientations
 were assigned independently by the phasing tool and nothing here can pair them up, so variants
@@ -217,6 +265,17 @@ looks like on the reference and on this sample's copy, without the isolated-vari
 ```
 #GENE1_+_0_2000:chrTest_1000_G_A:HAP2
 112	0.000000	0.630000	0.000000	0.590000
+```
+
+`--local` also keeps two pairs, `REF` and `ALT` — genotype and phasing are ignored entirely (as
+described above), so there is no haplotype background and `HAP_REF`/`HAP_ALT` would always just
+repeat them. It takes priority over `--ref-hapalt-only` if both are passed, since under `--local`
+the two would produce the same columns anyway. The copy is always `HAP.`, since nothing is ever
+split across copies:
+
+```
+#GENE1_+_0_2000:chrTest_1000_G_A:HAP.
+112	0.000000	0.630000	0.000000	0.020000
 ```
 
 ## Inference backend

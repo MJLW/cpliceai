@@ -1,0 +1,10 @@
+.git
+build/
+build-*/
+.venv/
+out/
+data/
+models/tf/
+tests/
+.devcontainer/
+*.vcf

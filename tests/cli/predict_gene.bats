@@ -37,4 +37,5 @@ load '../lib/common'
     run "$CPLICEAI_PREDICT_GENE_BIN" -h
     [[ "$output" == *"--include-unphased"* ]]
     [[ "$output" == *"--ref-hapalt-only"* ]]
+    [[ "$output" == *"--local"* ]]
 }

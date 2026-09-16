@@ -13,6 +13,7 @@
 struct HapBuffer {
     VariantReader *reader;
     bool include_unphased;
+    bool local_only;
     hts_pos_t span;
 
     /* Deque of buffered records: live entries are rec[head .. n). */
@@ -135,7 +136,7 @@ static void assign_haplotypes(const VariantRecord *src, HapRecord *dst, bool inc
     }
 }
 
-static HapRecord *hap_record_from(const VariantRecord *src, bool include_unphased) {
+static HapRecord *hap_record_from(const VariantRecord *src, bool include_unphased, bool local_only) {
     HapRecord *dst = xmalloc(sizeof(HapRecord));
 
     dst->chrom = xstrdup(src->chrom);
@@ -146,7 +147,7 @@ static HapRecord *hap_record_from(const VariantRecord *src, bool include_unphase
     dst->hap_mask = src->n_alt > 0 ? xmalloc(src->n_alt * sizeof(int)) : NULL;
     for (int i = 0; i < src->n_alt; i++) dst->alt[i] = xstrdup(src->alt[i]);
 
-    dst->has_gt = src->ploidy > 0;
+    /* The genotype itself always round-trips to output, whether or not it drives scoring. */
     dst->gt[0] = src->gt[0];
     dst->gt[1] = src->gt[1];
     dst->ploidy = src->ploidy;
@@ -154,7 +155,16 @@ static HapRecord *hap_record_from(const VariantRecord *src, bool include_unphase
 
     dst->bcf = src->bcf != NULL ? bcf_dup(src->bcf) : NULL;
 
-    assign_haplotypes(src, dst, include_unphased);
+    if (local_only) {
+        /* Scored exactly as if no genotype were present: every allele on its own, nothing ever
+           dropped or split across copies. */
+        dst->has_gt = false;
+        for (int i = 0; i < dst->n_alt; i++) dst->hap_mask[i] = 0;
+        dst->drop = false;
+    } else {
+        dst->has_gt = src->ploidy > 0;
+        assign_haplotypes(src, dst, include_unphased);
+    }
 
     return dst;
 }
@@ -214,12 +224,12 @@ static int buffer_fill_one(HapBuffer *buffer) {
         buffer->m = m;
     }
 
-    buffer->rec[buffer->n++] = hap_record_from(&record, buffer->include_unphased);
+    buffer->rec[buffer->n++] = hap_record_from(&record, buffer->include_unphased, buffer->local_only);
 
     return EXIT_SUCCESS;
 }
 
-int hap_buffer_open(VariantReader *reader, bool include_unphased, hts_pos_t span,
+int hap_buffer_open(VariantReader *reader, bool include_unphased, bool local_only, hts_pos_t span,
                     HapBuffer **buffer) {
     HapBuffer *b = calloc(1, sizeof(HapBuffer));
     if (b == NULL) {
@@ -229,6 +239,7 @@ int hap_buffer_open(VariantReader *reader, bool include_unphased, hts_pos_t span
 
     b->reader = reader;
     b->include_unphased = include_unphased;
+    b->local_only = local_only;
     b->span = span;
     kv_init(b->seen_contigs);
 

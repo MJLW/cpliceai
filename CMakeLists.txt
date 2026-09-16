@@ -276,6 +276,10 @@ target_include_directories(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_INCLUDE_DIRS
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
 target_link_libraries(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_LIBS} ${HTSLIB_LIBRARIES})
 
+# Install CLI binaries
+install(TARGETS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene
+        RUNTIME DESTINATION bin)
+
 # Install library
 install(TARGETS libcpliceai
         LIBRARY DESTINATION lib

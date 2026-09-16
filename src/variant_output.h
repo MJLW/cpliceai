@@ -33,9 +33,15 @@ typedef struct VariantWriter VariantWriter;
  * The format and, for VCF, the header to pass through are both taken from reader, so the
  * output cannot drift from the input.
  *
+ * local_only leaves SpliceAI_HAP and SpliceAI_TOT out of the output entirely - no INFO lines,
+ * no TSV columns - rather than writing them out equal to SpliceAI, since --local guarantees
+ * they always would be. Whatever is passed to variant_writer_write for those two is then
+ * ignored.
+ *
  * Returns EXIT_SUCCESS on success, EXIT_FAILURE (having logged) otherwise.
  */
-int variant_writer_open(const char *path, const VariantReader *reader, VariantWriter **writer);
+int variant_writer_open(const char *path, const VariantReader *reader, bool local_only,
+                        VariantWriter **writer);
 
 /*
  * variant_writer_write - Write one annotated record.

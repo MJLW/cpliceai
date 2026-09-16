@@ -34,6 +34,7 @@
 
 #define BOOLEAN_ARGS \
     BOOLEAN_ARG(include_unphased, "--include-unphased", "Score heterozygous variants whose phase is unknown, placing them on both haplotypes") \
+    BOOLEAN_ARG(local, "--local", "Ignore genotype/phasing entirely: score every variant on its own against the reference genome, as if run with no GT at all. Nothing is ever dropped; --include-unphased has no additional effect") \
     BOOLEAN_ARG(help, "-h", "Show help")
 
 #include <easyargs.h>
@@ -316,10 +317,10 @@ int main(int argc, char *argv[]) {
      * the variant, and an allele may itself be window_radius long before it is refused.
      */
     HapBuffer *buffer;
-    if (hap_buffer_open(reader, args.include_unphased, BOUNDARY_SIZE + 2 * window_radius, &buffer) != EXIT_SUCCESS) return EXIT_FAILURE;
+    if (hap_buffer_open(reader, args.include_unphased, args.local, BOUNDARY_SIZE + 2 * window_radius, &buffer) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     VariantWriter *writer;
-    if (variant_writer_open(annotated_variants, reader, &writer) != EXIT_SUCCESS) return EXIT_FAILURE;
+    if (variant_writer_open(annotated_variants, reader, args.local, &writer) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     regidx_t *gene_index = NULL;
     uint64_t regions_digest;

@@ -196,6 +196,41 @@ base_at() {
     [ "$(part "$(field "$TEST_TMPDIR/kept.tsv" 130 SpliceAI_TOT)" 7)" = "0.63" ]
 }
 
+@test "--local ignores genotype and phasing entirely, and drops the haplotype columns" {
+    build_reference
+
+    # The same co-phased pair the neighbour-background test above uses: without --local,
+    # chrTest:130 inherits chrTest:113's donor loss via SpliceAI_TOT.
+    predict_variant "$FIXTURES_DIR/variants.phased.tsv" "$TEST_TMPDIR/local.tsv" --local
+    [ "$status" -eq 0 ]
+
+    # SpliceAI_HAP and SpliceAI_TOT are not just redundant, they are absent - the header carries
+    # six columns, not eight, and every row matches it.
+    [ "$(head -1 "$TEST_TMPDIR/local.tsv")" = "$(printf 'CHROM\tPOS\tREF\tALT\tGT\tSpliceAI')" ]
+    [ "$(awk -F'\t' 'NR>1 {print NF}' "$TEST_TMPDIR/local.tsv" | sort -u)" = "6" ]
+
+    # Both variants still score, on their own, at the position the isolated donor-loss test
+    # expects (chrTest:113 destroys the site scored 0.63 at 112).
+    [ "$(part "$(field "$TEST_TMPDIR/local.tsv" 113 SpliceAI)" 6)" = "0.63" ]
+
+    # The genotype itself still round-trips to the GT column even though it drove none of the
+    # scoring above.
+    [ "$(awk -F'\t' '$2==113 { print $5 }' "$TEST_TMPDIR/local.tsv")" = "0|1" ]
+
+    # An unphased heterozygote, normally dropped, is scored instead of skipped.
+    predict_variant "$FIXTURES_DIR/variants.unphased.tsv" "$TEST_TMPDIR/local_unphased.tsv" --local
+    [ "$status" -eq 0 ]
+    [ -n "$(field "$TEST_TMPDIR/local_unphased.tsv" 113 SpliceAI)" ]
+
+    # A VCF gets only INFO/SpliceAI in its header, not the other two.
+    predict_variant "$FIXTURES_DIR/variants.phased.vcf" "$TEST_TMPDIR/local.vcf" --local
+    [ "$status" -eq 0 ]
+    run bash -c "grep -c '^##INFO=<ID=SpliceAI' '$TEST_TMPDIR/local.vcf'"
+    [ "$output" -eq 1 ]
+    run bash -c "grep -c '^##INFO=<ID=SpliceAI_HAP\|^##INFO=<ID=SpliceAI_TOT' '$TEST_TMPDIR/local.vcf'"
+    [ "$output" -eq 0 ]
+}
+
 @test "a co-phased indel leaves reported positions relative to the reference" {
     build_reference
 
@@ -278,6 +313,32 @@ base_at() {
     slim="$(awk '/:HAP2$/{n++} n==1 && $1==112 { print }' "$TEST_TMPDIR/slim.tsv")"
     [ "$(cut -f2,3 <<< "$slim")" = "$(cut -f2,3 <<< "$first")" ]
     [ "$(cut -f4,5 <<< "$slim")" = "$(cut -f8,9 <<< "$first")" ]
+}
+
+@test "predict_gene --local keeps only REF and ALT" {
+    build_reference
+
+    # Same variant, run normally (four tracks) and with --local (genotype/phasing ignored).
+    predict_gene "$FIXTURES_DIR/variants.donor.tsv" "$TEST_TMPDIR/full.tsv"
+    [ "$status" -eq 0 ]
+    predict_gene "$FIXTURES_DIR/variants.donor.tsv" "$TEST_TMPDIR/local.tsv" --local
+    [ "$status" -eq 0 ]
+
+    # No copy to name, same as an ordinary genotype-less run.
+    run grep -c ':HAP\.$' "$TEST_TMPDIR/local.tsv"
+    [ "$output" -eq 1 ]
+
+    # Five columns (POS + REF + ALT), not nine.
+    run bash -c "grep -v '^#' '$TEST_TMPDIR/local.tsv' | awk -F'\t' 'NF==5' | wc -l"
+    local rows="$output"
+    [ "$rows" -gt 0 ]
+
+    # REF and ALT themselves are unchanged from the full run - --local only drops HAP_REF/HAP_ALT,
+    # it does not change how REF or ALT are scored.
+    local full_row local_row
+    full_row="$(awk '$1==112 { print }' "$TEST_TMPDIR/full.tsv")"
+    local_row="$(awk '$1==112 { print }' "$TEST_TMPDIR/local.tsv")"
+    [ "$(cut -f1-5 <<< "$full_row")" = "$local_row" ]
 }
 
 @test "unsorted input fails instead of assembling the wrong haplotype" {

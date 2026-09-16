@@ -108,10 +108,17 @@ typedef struct HapBuffer HapBuffer;
  * BOUNDARY_SIZE + window_radius for a windowed score, the longest gene for a whole-gene one.
  * Nothing further away is retained.
  *
+ * local_only makes every record behave as though it carried no genotype at all, whatever GT it
+ * actually has: every allele is scored alone against the reference genome (never dropped for
+ * unphased heterozygosity, never split across copies), exactly as it would be with no GT column
+ * or FORMAT/GT present. The genotype itself is untouched otherwise - HapRecord::gt/ploidy/phased
+ * still reflect what was read, so it still round-trips to output - only its effect on scoring is
+ * suppressed. include_unphased is ignored when local_only is set, since nothing is ever dropped.
+ *
  * Returns EXIT_SUCCESS on success, EXIT_FAILURE (having logged) otherwise.
  */
-int hap_buffer_open(VariantReader *reader, bool include_unphased, hts_pos_t span,
-                    HapBuffer **buffer);
+int hap_buffer_open(VariantReader *reader, bool include_unphased, bool local_only,
+                    hts_pos_t span, HapBuffer **buffer);
 
 /*
  * hap_buffer_next - Advance to the next variant to be scored.

@@ -34,6 +34,7 @@
 #define BOOLEAN_ARGS \
     BOOLEAN_ARG(include_unphased, "--include-unphased", "Score heterozygous variants whose phase is unknown, placing them on both haplotypes") \
     BOOLEAN_ARG(ref_hapalt_only, "--ref-hapalt-only", "Write only the REF and HAP_ALT score columns, leaving out ALT and HAP_REF") \
+    BOOLEAN_ARG(local, "--local", "Ignore genotype/phasing entirely: score every variant on its own against the reference genome, as if run with no GT at all. Nothing is ever dropped, --include-unphased has no additional effect, and only REF and ALT are written (HAP_REF/HAP_ALT would just repeat them) regardless of --ref-hapalt-only") \
     BOOLEAN_ARG(help, "-h", "Show help")
 
 #include <easyargs.h>
@@ -50,6 +51,9 @@
  *
  * --ref-hapalt-only keeps the first and last of those, which is the pair that answers "what
  * does this sample's copy of the gene look like" without the isolated-variant working.
+ *
+ * --local keeps just REF and ALT: with no haplotype background ever assembled, HAP_REF and
+ * HAP_ALT would always equal them anyway.
  */
 
 /*
@@ -108,7 +112,7 @@ static const float *hap_alt_scores(Model *models, const GeneReference *gene, con
  * site that only exists on the haplotype is not filtered away before it can be seen.
  */
 void write_gene_scores(FILE *output, const GeneReference *gene, const float *alt, const float *hap_ref,
-                       const float *hap_alt, bool ref_hapalt_only) {
+                       const float *hap_alt, bool ref_hapalt_only, bool local) {
     for (size_t i = 0; i < gene->seq.l; i++) {
         const float scores[][2] = {
             { gene->scores[i * NUM_SCORES + ACCEPTOR_POS], gene->scores[i * NUM_SCORES + DONOR_POS] },
@@ -124,7 +128,11 @@ void write_gene_scores(FILE *output, const GeneReference *gene, const float *alt
         if (!any) continue;
 
         fprintf(output, "%li", i + gene->start + 1);
-        if (ref_hapalt_only) {
+        if (local) {
+            /* HAP_REF and HAP_ALT are always just REF and ALT again under --local (there is no
+               haplotype background), so leave them out rather than repeat them. */
+            fprintf(output, "\t%f\t%f\t%f\t%f\n", scores[0][0], scores[0][1], scores[1][0], scores[1][1]);
+        } else if (ref_hapalt_only) {
             fprintf(output, "\t%f\t%f\t%f\t%f\n", scores[0][0], scores[0][1], scores[3][0], scores[3][1]);
         } else {
             fprintf(output, "\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
@@ -161,7 +169,7 @@ int main(int argc, char *argv[]) {
      * haplotype and has to still be buffered when its neighbours are reached.
      */
     HapBuffer *buffer;
-    if (hap_buffer_open(reader, args.include_unphased, longest_gene, &buffer) != EXIT_SUCCESS) return EXIT_FAILURE;
+    if (hap_buffer_open(reader, args.include_unphased, args.local, longest_gene, &buffer) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     // Load reference from binary file
     Reference ref;
@@ -290,7 +298,7 @@ int main(int argc, char *argv[]) {
                     log_info("%s\t%li\t%li\t%s\t%c\t%i", record->chrom, current_gene.start, current_gene.end, current_gene.name, current_gene.strand, current_gene.end - current_gene.start);
 
                     write_gene_scores(output, &current_gene, alt_predictions, hap_ref_predictions,
-                                      hap_alt_predictions, args.ref_hapalt_only);
+                                      hap_alt_predictions, args.ref_hapalt_only, args.local);
 
                     free(hap_ref_owned);
                 }

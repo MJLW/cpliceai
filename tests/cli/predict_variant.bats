@@ -36,6 +36,7 @@ load '../lib/common'
 @test "cpliceai_predict_variant documents its haplotype flag" {
     run "$CPLICEAI_PREDICT_VARIANT_BIN" -h
     [[ "$output" == *"--include-unphased"* ]]
+    [[ "$output" == *"--local"* ]]
 }
 
 # Also before load_models: genotypes are read from one sample, and choosing between several

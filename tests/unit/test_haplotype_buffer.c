@@ -50,10 +50,15 @@ static const char *write_file(const char *name, const char *content) {
     return path;
 }
 
+static void open_buffer_ex(const char *path, bool include_unphased, bool local_only, hts_pos_t span,
+                           VariantReader **reader_out, HapBuffer **buffer_out) {
+    ck_assert_int_eq(variant_reader_open(path, VARIANT_FORMAT_AUTO, reader_out), EXIT_SUCCESS);
+    ck_assert_int_eq(hap_buffer_open(*reader_out, include_unphased, local_only, span, buffer_out), EXIT_SUCCESS);
+}
+
 static void open_buffer(const char *path, bool include_unphased, hts_pos_t span,
                         VariantReader **reader_out, HapBuffer **buffer_out) {
-    ck_assert_int_eq(variant_reader_open(path, VARIANT_FORMAT_AUTO, reader_out), EXIT_SUCCESS);
-    ck_assert_int_eq(hap_buffer_open(*reader_out, include_unphased, span, buffer_out), EXIT_SUCCESS);
+    open_buffer_ex(path, include_unphased, false, span, reader_out, buffer_out);
 }
 
 /* --- genotype -> copy mask assignment, driven through hap_buffer_next -------------------- */
@@ -145,6 +150,81 @@ START_TEST(test_triploid_vcf_uses_only_first_two_copies) {
     ck_assert_int_eq(record->gt[1], 1);
     ck_assert_int_eq(record->hap_mask[0], HAP_2);
 
+    hap_buffer_close(buffer);
+    variant_reader_close(reader);
+}
+END_TEST
+
+/* --- local_only: scored as if genotype-less, whatever GT is actually present -------------- */
+
+START_TEST(test_local_only_scores_a_phased_variant_as_if_genotype_less) {
+    const char *path = write_file("v.tsv", "CHROM\tPOS\tREF\tALT\tGT\nchr1\t100\tG\tA\t0|1\n");
+
+    VariantReader *reader; HapBuffer *buffer;
+    open_buffer_ex(path, false, true, 1000, &reader, &buffer);
+
+    const HapRecord *record;
+    ck_assert_int_eq(hap_buffer_next(buffer, &record), EXIT_SUCCESS);
+
+    /* The genotype itself still round-trips (gt/ploidy/phased untouched)... */
+    ck_assert_int_eq(record->ploidy, 2);
+    ck_assert_int_eq(record->gt[0], 0);
+    ck_assert_int_eq(record->gt[1], 1);
+    ck_assert(record->phased);
+
+    /* ...but it has no effect on scoring: same shape as a genuinely genotype-less record. */
+    ck_assert(!record->has_gt);
+    ck_assert(!record->drop);
+    ck_assert_int_eq(record->hap_mask[0], 0);
+
+    hap_buffer_close(buffer);
+    variant_reader_close(reader);
+}
+END_TEST
+
+START_TEST(test_local_only_never_drops_an_unphased_heterozygote) {
+    const char *path = write_file("v.tsv", "CHROM\tPOS\tREF\tALT\tGT\nchr1\t100\tG\tA\t0/1\n");
+
+    VariantReader *reader; HapBuffer *buffer;
+    open_buffer_ex(path, false, true, 1000, &reader, &buffer);
+
+    const HapRecord *record;
+    ck_assert_int_eq(hap_buffer_next(buffer, &record), EXIT_SUCCESS);
+
+    /* Without --local this would be dropped (see the mask_assignment table above); with it,
+       phase is irrelevant and it is scored like any other genotype-less allele. */
+    ck_assert(!record->drop);
+    ck_assert(!record->has_gt);
+
+    hap_buffer_close(buffer);
+    variant_reader_close(reader);
+}
+END_TEST
+
+START_TEST(test_local_only_never_builds_a_haplotype_background) {
+    /* Two variants that would ordinarily be co-phased on the same copy. */
+    const char *path = write_file("v.tsv",
+        "CHROM\tPOS\tREF\tALT\tGT\n"
+        "chr1\t100\tG\tA\t0|1\n"
+        "chr1\t120\tG\tC\t0|1\n");
+
+    VariantReader *reader; HapBuffer *buffer;
+    open_buffer_ex(path, false, true, 1000, &reader, &buffer);
+
+    const HapRecord *first;
+    ck_assert_int_eq(hap_buffer_next(buffer, &first), EXIT_SUCCESS);
+
+    SeqEditList edits;
+    seq_edit_list_init(&edits);
+
+    /* Neither HAP_1 nor HAP_2 ever matches a mask of 0, so nothing is ever collected - not even
+       the neighbour that would otherwise be co-phased with it. */
+    hap_edits_collect(buffer, HAP_1, "chr1", 0, 0, 1000, first, 0, &edits);
+    ck_assert_uint_eq(edits.n, 0);
+    hap_edits_collect(buffer, HAP_2, "chr1", 0, 0, 1000, first, 0, &edits);
+    ck_assert_uint_eq(edits.n, 0);
+
+    seq_edit_list_destroy(&edits);
     hap_buffer_close(buffer);
     variant_reader_close(reader);
 }
@@ -369,6 +449,12 @@ static Suite *haplotype_buffer_suite(void) {
     tcase_add_loop_test(tc_mask, test_mask_assignment_table, 0, N_MASK_CASES);
     tcase_add_test(tc_mask, test_triploid_vcf_uses_only_first_two_copies);
     suite_add_tcase(s, tc_mask);
+
+    TCase *tc_local = tcase_create("local_only");
+    tcase_add_test(tc_local, test_local_only_scores_a_phased_variant_as_if_genotype_less);
+    tcase_add_test(tc_local, test_local_only_never_drops_an_unphased_heterozygote);
+    tcase_add_test(tc_local, test_local_only_never_builds_a_haplotype_background);
+    suite_add_tcase(s, tc_local);
 
     TCase *tc_collect = tcase_create("edits_collect");
     tcase_add_test(tc_collect, test_edits_collect_excludes_the_variant_under_consideration);
