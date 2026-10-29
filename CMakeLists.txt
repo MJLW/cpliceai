@@ -133,16 +133,25 @@ endforeach()
 # below which load real models.
 set(CPLICEAI_UNIT_TEST_DEPS "")
 if(CHECK_FOUND)
+    # The custom target `check` at the bottom has the name of the library. A bare `check` in target_link_libraries is taken for that
+    # target, which depends on the tests: a cycle ("Cyclic dependencies are allowed only among static libraries"). So the library
+    # is linked by its full path (CMake 3.12 and later), and by the names pkg-config gave only on an older CMake.
+    if(CHECK_LINK_LIBRARIES)
+        set(CPLICEAI_CHECK_LIBRARIES ${CHECK_LINK_LIBRARIES})
+    else()
+        set(CPLICEAI_CHECK_LIBRARIES ${CHECK_LIBRARIES})
+    endif()
+
     add_executable(test_seqedit tests/unit/test_seqedit.c)
     target_include_directories(test_seqedit PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
-    target_link_libraries(test_seqedit PRIVATE utils logging ${CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+    target_link_libraries(test_seqedit PRIVATE utils logging ${CPLICEAI_CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
     target_link_directories(test_seqedit PRIVATE ${CHECK_LIBRARY_DIRS})
     add_sanitizers(test_seqedit)
 
     add_executable(test_haplotype_buffer tests/unit/test_haplotype_buffer.c)
     target_include_directories(test_haplotype_buffer PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
     target_link_libraries(test_haplotype_buffer PRIVATE haplotype variant_io gene_regions utils logging
-        ${CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+        ${CPLICEAI_CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
     target_link_directories(test_haplotype_buffer PRIVATE ${CHECK_LIBRARY_DIRS})
     add_sanitizers(test_haplotype_buffer)
 
