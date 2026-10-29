@@ -119,7 +119,12 @@ int process_gene_region(Model *models, faidx_t *fa, const Gene *gene, Reference 
 
     // Turn predictions into chunks and PositionScores
     for (uint64_t i = 0; i < size; i += CHUNK_SIZE) {
-        Chunk chunk = { .n_scores = 0, .scores_start = ref->n_scores };
+        // Zeroed first: Chunk has a padding gap between n_scores and scores_start that a
+        // designated-initializer list does not cover, and reference_add_chunk copies the whole
+        // struct (padding included) into the output buffer -- leaving it merely
+        // field-initialized let uninitialised stack bytes reach reference.bin non-deterministically.
+        Chunk chunk = {0};
+        chunk.scores_start = ref->n_scores;
         reference_add_chunk(chunk, ref);
 
         // Iterate over scores in chunk
@@ -182,7 +187,14 @@ int main(int argc, char *argv[]) {
             current_region = strndup(gene.chrom, FIELD_MAX_LEN);
         }
 
-        Region region = { .n_chunks = 0, .chunk_size = CHUNK_SIZE, .size = gene.tx_end - gene.tx_start, .strand = gene.strand, .chunk_start = ref.n_chunks, .name_start = ref.region_names_len };
+        // Zeroed first: same padding-gap hazard as Chunk above (Region interleaves char/uint16_t
+        // fields with uint32_t ones, leaving several gaps a designated initializer won't cover).
+        Region region = {0};
+        region.chunk_size = CHUNK_SIZE;
+        region.size = gene.tx_end - gene.tx_start;
+        region.strand = gene.strand;
+        region.chunk_start = ref.n_chunks;
+        region.name_start = ref.region_names_len;
         reference_add_region(region, gene.name, gene.tx_start, gene.tx_end, &ref);
 
         if (process_gene_region(models, fa_in, &gene, &ref) != EXIT_SUCCESS) {

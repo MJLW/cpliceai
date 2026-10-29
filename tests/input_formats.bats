@@ -41,14 +41,15 @@ predict_gene() {
         "$@"
 }
 
-# The pipe-delimited SpliceAI value(s) of the single record in an annotated VCF.
+# The pipe-delimited SpliceAI value(s) of the single record in an annotated VCF. Asked for by
+# tag rather than cut out of INFO, which now carries SpliceAI_HAP and SpliceAI_TOT beside it.
 vcf_annotation() {
-    bcftools view -H "$1" | cut -f8 | sed 's/^SpliceAI=//'
+    bcftools query -f '%INFO/SpliceAI\n' "$1"
 }
 
 # The SpliceAI column of the single data row in an annotated TSV (skipping the header).
 tsv_annotation() {
-    tail -n +2 "$1" | cut -f5
+    tail -n +2 "$1" | cut -f6
 }
 
 @test "predict_variant scores a TSV variant identically to the same variant in a VCF" {
@@ -62,7 +63,7 @@ tsv_annotation() {
 
     # The output format mirrors the input, so the two runs produced different formats...
     [[ "$(head -1 "$TEST_TMPDIR/from_vcf.vcf")" == "##fileformat=VCF"* ]]
-    [ "$(head -1 "$TEST_TMPDIR/from_tsv.tsv")" = "CHROM	POS	REF	ALT	SpliceAI" ]
+    [ "$(head -1 "$TEST_TMPDIR/from_tsv.tsv")" = "CHROM	POS	REF	ALT	GT	SpliceAI	SpliceAI_HAP	SpliceAI_TOT" ]
 
     # ...carrying the same annotation.
     [ "$(vcf_annotation "$TEST_TMPDIR/from_vcf.vcf")" = "$(tsv_annotation "$TEST_TMPDIR/from_tsv.tsv")" ]
@@ -93,12 +94,12 @@ tsv_annotation() {
     predict_variant "$FIXTURES_DIR/variants.rich.vcf" "$TEST_TMPDIR/annotated.vcf"
     [ "$status" -eq 0 ]
 
-    # The header gains exactly the SpliceAI INFO line and nothing else. bcftools stamps its
-    # own ##bcftools_viewCommand provenance line onto whatever it reads, so exclude that -
+    # The header gains exactly the three SpliceAI INFO lines and nothing else. bcftools stamps
+    # its own ##bcftools_viewCommand provenance line onto whatever it reads, so exclude that -
     # it comes from the reader, not from us.
     run bash -c "diff <(bcftools view -h '$FIXTURES_DIR/variants.rich.vcf') \
                       <(bcftools view -h '$TEST_TMPDIR/annotated.vcf') \
-                 | grep '^>' | grep -v '##bcftools_' | grep -vc '##INFO=<ID=SpliceAI,'"
+                 | grep '^>' | grep -v '##bcftools_' | grep -vcE '##INFO=<ID=SpliceAI(_HAP|_TOT)?,'"
     [ "$output" -eq 0 ]
 
     # CHROM POS ID REF ALT QUAL FILTER are byte-identical; only INFO grew.
@@ -229,8 +230,8 @@ tsv_annotation() {
     predict_variant "$FIXTURES_DIR/variants.tsv" "$TEST_TMPDIR/once.tsv"
     [ "$status" -eq 0 ]
 
-    # The first four columns are exactly the input schema, so the annotated output is itself
-    # valid input; the trailing SPLICEAI column is read past and ignored.
+    # The first five columns are exactly the input schema, so the annotated output is itself
+    # valid input; the trailing SpliceAI columns are read past and ignored.
     predict_variant "$TEST_TMPDIR/once.tsv" "$TEST_TMPDIR/twice.tsv"
     [ "$status" -eq 0 ]
 
@@ -275,12 +276,13 @@ tsv_annotation() {
     run diff "$TEST_TMPDIR/ma_tsv.tsv" "$TEST_TMPDIR/ma_vcf.tsv"
     [ "$status" -eq 0 ]
 
-    # Block headers name a single allele each, so a 2-allele record yields 2 blocks.
+    # Block headers name a single allele and copy each. These variants carry no genotype, so
+    # there is no copy to name and one block per allele.
     run grep -c '^#GENE1_' "$TEST_TMPDIR/ma_vcf.tsv"
     [ "$output" -eq 2 ]
-    run grep -c '^#GENE1_+_0_2000:chrTest_1000_G_A$' "$TEST_TMPDIR/ma_vcf.tsv"
+    run grep -c '^#GENE1_+_0_2000:chrTest_1000_G_A:HAP\.$' "$TEST_TMPDIR/ma_vcf.tsv"
     [ "$output" -eq 1 ]
-    run grep -c '^#GENE1_+_0_2000:chrTest_1000_G_T$' "$TEST_TMPDIR/ma_vcf.tsv"
+    run grep -c '^#GENE1_+_0_2000:chrTest_1000_G_T:HAP\.$' "$TEST_TMPDIR/ma_vcf.tsv"
     [ "$output" -eq 1 ]
 }
 

@@ -2,6 +2,7 @@
 
 #include "logging/log.h"
 #include "utils.h"
+#include <inttypes.h>
 #include <stdlib.h>
 
 int gene_reference_init(GeneReference *gene) {
@@ -167,6 +168,42 @@ int gene_reference_get_score_window(const hts_pos_t variant_pos, const int windo
     return EXIT_SUCCESS;
 }
 
+
+int gene_reference_predict(Model *models, const GeneReference *gene, const SeqEdit *edits,
+                           const int n_edits, const int64_t ref_lo, const int64_t ref_hi,
+                           float *scores[]) {
+    const int64_t hap_lo = seq_edits_ref_to_hap(edits, n_edits, ref_lo);
+    const int64_t hap_hi = seq_edits_ref_to_hap(edits, n_edits, ref_hi);
+    const int64_t width = (hap_hi - hap_lo) + CONTEXT_SIZE;
+
+    char *padded_seq = malloc(width);
+    if (padded_seq == NULL) {
+        log_fatal("Failed to allocate %"PRId64" bytes for padded sequence", width);
+        exit(EXIT_FAILURE);
+    }
+    build_hap_window(&gene->seq, edits, n_edits, hap_lo - BOUNDARY_SIZE, hap_hi + BOUNDARY_SIZE, padded_seq);
+
+    float *predictions;
+    int n_predictions;
+    if (predict_padded_sequence(models, padded_seq, (int) width, gene->strand, &predictions, &n_predictions) != EXIT_SUCCESS) {
+        free(padded_seq);
+        return EXIT_FAILURE;
+    }
+    free(padded_seq);
+
+    const size_t aligned_size = (size_t) (ref_hi - ref_lo) * NUM_SCORES * sizeof(float);
+    float *aligned = malloc(aligned_size);
+    if (aligned == NULL) {
+        log_fatal("Failed to allocate %zu bytes for aligned predictions", aligned_size);
+        exit(EXIT_FAILURE);
+    }
+    align_predictions_multi(edits, n_edits, ref_lo, ref_hi - ref_lo, predictions, aligned);
+    free(predictions);
+
+    *scores = aligned;
+
+    return EXIT_SUCCESS;
+}
 
 void gene_reference_destroy(GeneReference *gene) {
     if (gene->seq.s != NULL) free(gene->seq.s);

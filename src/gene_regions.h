@@ -84,13 +84,15 @@ void gene_list_destroy(GeneList *list);
  * gene_regions_build_regidx - Build an interval index of Gene payloads from a regions file.
  *
  * Parameters:
- *   path   - Gene region structure parsed from GFF with gff_to_bed.py.
- *   idx    - receives the index, which the caller must regidx_destroy.
- *   digest - receives the gene set's fingerprint (see gene_region_reader_digest); may be NULL.
+ *   path    - Gene region structure parsed from GFF with gff_to_bed.py.
+ *   idx     - receives the index, which the caller must regidx_destroy.
+ *   digest  - receives the gene set's fingerprint (see gene_region_reader_digest); may be NULL.
+ *   longest - receives the longest gene's span, i.e. how far apart two variants can be and
+ *             still fall in one gene; may be NULL.
  *
  * Returns EXIT_SUCCESS on success, EXIT_FAILURE (having logged) otherwise.
  */
-int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest);
+int gene_regions_build_regidx(const char *path, regidx_t **idx, uint64_t *digest, int64_t *longest);
 
 /*
  * gene_regions_containing - Collect every gene that fully contains a variant.

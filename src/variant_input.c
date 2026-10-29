@@ -1,5 +1,6 @@
 #include "variant_input.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,13 +21,37 @@ struct VariantReader {
     /* VCF */
     bcf_hdr_t *hdr;
     bcf1_t *rec;
+    int32_t *gt_buf; /* bcf_get_genotypes scratch, grown by htslib and reused across records */
+    int m_gt_buf;
 
     /* TSV */
     kstring_t line;
     AltVec alts;
     uint64_t line_no;
     bool checked_first_line; /* gates header detection to exactly one line */
+
+    bool warned_polyploid; /* the ploidy warning is per file, not per record */
 };
+
+/* A record with no genotype, which is what both readers fall back to. */
+static void genotype_clear(VariantRecord *record) {
+    record->gt[0] = GT_ALLELE_MISSING;
+    record->gt[1] = GT_ALLELE_MISSING;
+    record->ploidy = 0;
+    record->phased = false;
+}
+
+/*
+ * A genotype naming no allele at all - './.', '.', or the '.' this tool writes for a record
+ * that arrived without one - says nothing about which copy anything sits on, which is the same
+ * as having no genotype. Collapsing the two keeps an annotated file readable as input.
+ */
+static void genotype_drop_if_empty(VariantRecord *record) {
+    for (int copy = 0; copy < record->ploidy; copy++) {
+        if (record->gt[copy] != GT_ALLELE_MISSING) return;
+    }
+    genotype_clear(record);
+}
 
 int variant_input_format_parse(const char *s, VariantFormat *fmt) {
     if (strcmp(s, "vcf") == 0)  { *fmt = VARIANT_FORMAT_VCF;  return EXIT_SUCCESS; }
@@ -90,6 +115,16 @@ int variant_reader_open(const char *path, VariantFormat fmt, VariantReader **rea
             variant_reader_close(r);
             return EXIT_FAILURE;
         }
+
+        const int n_samples = bcf_hdr_nsamples(r->hdr);
+        if (n_samples > 1) {
+            log_error("%s carries %d samples. Genotypes are read from one sample, so extract "
+                      "the one you want first: bcftools view -s <SAMPLE> %s",
+                      path, n_samples, path);
+            variant_reader_close(r);
+            return EXIT_FAILURE;
+        }
+
         r->rec = bcf_init();
         if (r->rec == NULL) {
             log_fatal("Failed to allocate a VCF record");
@@ -112,6 +147,44 @@ bcf_hdr_t *variant_reader_hdr(const VariantReader *reader) {
     return reader->hdr;
 }
 
+/*
+ * Read FORMAT/GT for the file's single sample, leaving the record genotype-less when the file
+ * has no samples or the record has no GT.
+ */
+static void read_genotype_vcf(VariantReader *reader, VariantRecord *record) {
+    genotype_clear(record);
+
+    if (bcf_hdr_nsamples(reader->hdr) == 0) return;
+
+    const int n_gt = bcf_get_genotypes(reader->hdr, reader->rec, &reader->gt_buf, &reader->m_gt_buf);
+    if (n_gt <= 0) return;
+
+    /* One sample, so n_gt is the file's widest ploidy. A narrower call is padded out to it
+       with bcf_int32_vector_end, which ends the genotype here. */
+    int ploidy = 0;
+    for (int i = 0; i < n_gt && ploidy < 2; i++) {
+        const int32_t value = reader->gt_buf[i];
+        if (value == bcf_int32_vector_end) break;
+
+        record->gt[ploidy] = bcf_gt_is_missing(value) ? GT_ALLELE_MISSING : bcf_gt_allele(value);
+        ploidy++;
+    }
+
+    if (n_gt > 2 && !reader->warned_polyploid) {
+        log_warn("%s is %d-ploid; only the first two copies of each genotype are used.",
+                 reader->path, n_gt);
+        reader->warned_polyploid = true;
+    }
+
+    record->ploidy = ploidy;
+    /* htslib carries the separator on the allele it follows, so a diploid genotype's phase
+       lives on its second copy. A haploid call is ordered by having nothing to be ordered
+       against: its one allele is on the sample's one molecule. */
+    record->phased = (ploidy < 2) || bcf_gt_is_phased(reader->gt_buf[1]);
+
+    genotype_drop_if_empty(record);
+}
+
 static int variant_reader_next_vcf(VariantReader *reader, VariantRecord *record) {
     int ret = bcf_read(reader->fp, reader->hdr, reader->rec);
     if (ret == -1) return VARIANT_READER_EOF;
@@ -129,6 +202,8 @@ static int variant_reader_next_vcf(VariantReader *reader, VariantRecord *record)
     record->n_alt = v->n_allele - 1;
     record->alt   = v->d.allele + 1;
     record->bcf   = v;
+
+    read_genotype_vcf(reader, record);
 
     return EXIT_SUCCESS;
 }
@@ -162,9 +237,59 @@ static int split_alts(VariantReader *reader, char *field) {
 #define PARSE_NOT_A_RECORD (-2)
 
 /*
- * Parse one TSV data line: CHROM POS REF ALT.
+ * Parse a GT field into *record: one or two allele indices joined by '|' (phased) or '/'
+ * (unphased), each an index or '.'. "0|1", "1/0", "1|1", "1", "./." and "." are all accepted.
  *
- * Fields beyond the fourth are read past and ignored. POS is 1-based on disk and 0-based in
+ * Returns false, without logging, when the field is not GT-shaped. The caller treats that as
+ * an ordinary extra column and ignores it, which keeps the TSV's "fields beyond the fourth are
+ * ignored" rule intact - and in particular keeps an annotated output file readable as input,
+ * where the fifth column may be a SpliceAI annotation rather than a genotype.
+ */
+static bool parse_gt_field(const char *field, VariantRecord *record) {
+    int gt[2] = { GT_ALLELE_MISSING, GT_ALLELE_MISSING };
+    int ploidy = 0;
+    /* One copy is ordered by default: there is no second copy to have been swapped with. */
+    bool phased = true;
+
+    const char *cursor = field;
+    while (ploidy < 2) {
+        if (cursor[0] == '.') {
+            cursor++;
+        } else if (cursor[0] >= '0' && cursor[0] <= '9') {
+            char *end;
+            const unsigned long value = strtoul(cursor, &end, 10);
+            if (value > INT_MAX) return false;
+            gt[ploidy] = (int) value;
+            cursor = end;
+        } else {
+            return false;
+        }
+        ploidy++;
+
+        if (cursor[0] == '\0') break;
+        if (cursor[0] != '|' && cursor[0] != '/') return false;
+        phased = (cursor[0] == '|');
+        cursor++;
+    }
+
+    /* Trailing junk, or a third copy: not a genotype this tool can read. */
+    if (cursor[0] != '\0') return false;
+
+    record->gt[0] = gt[0];
+    record->gt[1] = gt[1];
+    record->ploidy = ploidy;
+    record->phased = phased;
+
+    genotype_drop_if_empty(record);
+
+    return true;
+}
+
+/*
+ * Parse one TSV data line: CHROM POS REF ALT [GT].
+ *
+ * The fifth field is a genotype when it is shaped like one and an ignorable extra column
+ * otherwise; fields beyond it are read past and ignored. POS is 1-based on disk and 0-based in
  * the record, matching bcf1_t::pos.
  *
  * Returns PARSE_NOT_A_RECORD, without logging an error, when POS does not parse as a positive
@@ -200,6 +325,10 @@ static int parse_tsv_line(VariantReader *reader, VariantRecord *record) {
     }
 
     if (split_alts(reader, alt) != EXIT_SUCCESS) return EXIT_FAILURE;
+
+    genotype_clear(record);
+    const char *gt = next_tsv_field(&cursor);
+    if (gt != NULL && gt[0] != '\0') parse_gt_field(gt, record);
 
     record->chrom = chrom;
     record->pos   = (hts_pos_t) pos_value - 1;
@@ -262,6 +391,8 @@ void variant_reader_close(VariantReader *reader) {
     if (reader->rec != NULL) bcf_destroy(reader->rec);
     if (reader->hdr != NULL) bcf_hdr_destroy(reader->hdr);
     if (reader->fp != NULL) hts_close(reader->fp);
+
+    free(reader->gt_buf);
 
     free(reader->line.s);
     kv_destroy(reader->alts);

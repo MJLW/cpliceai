@@ -1,0 +1,7 @@
+tensorflow-cpu==2.18.1
+tf2onnx==1.17.0
+onnx==1.17.0
+onnxconverter-common==1.16.0
+onnxruntime==1.28.0
+numpy<2
+protobuf<5

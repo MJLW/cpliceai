@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     libbz2-dev \
     liblzma-dev \
+    check \
     && rm -rf /var/lib/apt/lists/*
 
 # htslib (VCF/BAM/FASTA access), providing htslib.pc for CMakeLists.txt.
@@ -98,10 +99,15 @@ RUN if getent passwd ubuntu > /dev/null; then userdel -r ubuntu; fi \
     && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
+# Add uv for python (standalone static binary)
+COPY --from=ghcr.io/astral-sh/uv:0.11.23 /uv /uvx /usr/local/bin/
+
 USER $USERNAME
 WORKDIR /workspaces
 
-ENV PATH="/home/$USERNAME/.local/bin:$PATH"
+ENV UV_LINK_MODE=copy \
+    PATH="/home/$USERNAME/.local/bin:/home/$USERNAME/.venv/bin:$PATH"
 
-# Claude Code CLI
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Data-analysis stack in a dedicated venv, on PATH for every shell
+RUN uv venv /home/$USERNAME/.venv \
+    && uv pip install --python /home/$USERNAME/.venv/bin/python polars numpy

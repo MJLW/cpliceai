@@ -17,6 +17,15 @@ find_package(Sanitizers)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HTSLIB REQUIRED htslib)
 
+# Check (https://libcheck.github.io/check/), for unit tests that call into haplotype.c/utils.c
+# directly rather than through a compiled binary. Optional, like bats-core below: a plain build
+# of the three binaries should not require a test framework nobody asked to install.
+pkg_check_modules(CHECK check)
+if(NOT CHECK_FOUND)
+    message(WARNING "check not found -- unit tests will be unavailable. "
+        "Install it (e.g. apt-get install check) to enable them.")
+endif()
+
 # Inference backend: ONNX Runtime (default, supports GPU via CUDA/TensorRT execution
 # providers) or TensorFlow (kept buildable for parity testing against the ONNX Runtime
 # migration; see tests/backend_parity.bats). Neither backend's headers leak into predict.h
@@ -80,7 +89,12 @@ add_library(range STATIC src/range.c)
 add_library(gene_regions STATIC src/gene_regions.c)
 add_library(reference STATIC src/reference.c)
 add_library(gene_reference STATIC src/gene_reference.c)
+# gene_reference_predict runs the model over a gene, so it sits on top of the inference backend
+# and the sequence helpers rather than beside them. Declared so the static link order follows.
+target_link_libraries(gene_reference PUBLIC predict utils)
 add_library(variant_io STATIC src/variant_input.c src/variant_output.c)
+add_library(haplotype STATIC src/haplotype.c)
+target_link_libraries(haplotype PUBLIC utils logging)
 
 set(CPLICEAI_COMMON_LIBS logging predict utils range gene_regions reference)
 
@@ -96,6 +110,7 @@ target_link_libraries(cpliceai_predict_variant PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
     variant_io
+    haplotype
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -104,6 +119,7 @@ target_link_libraries(cpliceai_predict_gene PRIVATE
     ${CPLICEAI_COMMON_LIBS}
     gene_reference
     variant_io
+    haplotype
     ${CPLICEAI_INFERENCE_LIBS}
     ${HTSLIB_LIBRARIES})
 
@@ -111,8 +127,51 @@ foreach(cpliceai_target cpliceai_reference cpliceai_predict_variant cpliceai_pre
     add_sanitizers(${cpliceai_target})
 endforeach()
 
-# End-to-end tests (bats-core), wired into CTest and `make check`
-find_program(BATS_EXECUTABLE bats REQUIRED)
+# Unit tests (Check), wired into CTest and `make check`. These call into haplotype.c/utils.c
+# directly -- no model, no CLI binary, no fixture files on disk beyond what a test writes to a
+# temp directory itself -- so they run in a fraction of a second each, unlike the bats suites
+# below which load real models.
+set(CPLICEAI_UNIT_TEST_DEPS "")
+if(CHECK_FOUND)
+    # The custom target `check` at the bottom has the name of the library. A bare `check` in target_link_libraries is taken for that
+    # target, which depends on the tests: a cycle ("Cyclic dependencies are allowed only among static libraries"). So the library
+    # is linked by its full path (CMake 3.12 and later), and by the names pkg-config gave only on an older CMake.
+    if(CHECK_LINK_LIBRARIES)
+        set(CPLICEAI_CHECK_LIBRARIES ${CHECK_LINK_LIBRARIES})
+    else()
+        set(CPLICEAI_CHECK_LIBRARIES ${CHECK_LIBRARIES})
+    endif()
+
+    add_executable(test_seqedit tests/unit/test_seqedit.c)
+    target_include_directories(test_seqedit PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
+    target_link_libraries(test_seqedit PRIVATE utils logging ${CPLICEAI_CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+    target_link_directories(test_seqedit PRIVATE ${CHECK_LIBRARY_DIRS})
+    add_sanitizers(test_seqedit)
+
+    add_executable(test_haplotype_buffer tests/unit/test_haplotype_buffer.c)
+    target_include_directories(test_haplotype_buffer PRIVATE src ${CHECK_INCLUDE_DIRS} ${HTSLIB_INCLUDE_DIRS})
+    target_link_libraries(test_haplotype_buffer PRIVATE haplotype variant_io gene_regions utils logging
+        ${CPLICEAI_CHECK_LIBRARIES} ${HTSLIB_LIBRARIES})
+    target_link_directories(test_haplotype_buffer PRIVATE ${CHECK_LIBRARY_DIRS})
+    add_sanitizers(test_haplotype_buffer)
+
+    foreach(unit_test test_seqedit test_haplotype_buffer)
+        add_test(NAME unit_${unit_test} COMMAND ${unit_test})
+        set_tests_properties(unit_${unit_test} PROPERTIES LABELS "unit" TIMEOUT 30)
+    endforeach()
+
+    set(CPLICEAI_UNIT_TEST_DEPS test_seqedit test_haplotype_buffer)
+endif()
+
+# End-to-end tests (bats-core), wired into CTest and `make check`. Optional: a plain build of
+# the three binaries should not require a test runner nobody asked to install.
+find_program(BATS_EXECUTABLE bats)
+if(NOT BATS_EXECUTABLE)
+    message(WARNING "bats-core not found -- test targets (check, ctest) will be unavailable. "
+        "Install bats-core to enable them: https://github.com/bats-core/bats-core")
+endif()
+
+if(BATS_EXECUTABLE)
 
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     set(CPLICEAI_TEST_MODEL_DIR "${CMAKE_SOURCE_DIR}/models/onnx")
@@ -173,6 +232,14 @@ set_tests_properties(input_formats PROPERTIES
     LABELS "e2e"
     TIMEOUT 900)
 
+# Haplotype assembly from phased genotypes, across both binaries and both input formats.
+add_test(NAME haplotype
+    COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/haplotype.bats)
+set_tests_properties(haplotype PROPERTIES
+    ENVIRONMENT "${CPLICEAI_TEST_ENVIRONMENT}"
+    LABELS "e2e"
+    TIMEOUT 900)
+
 if(CPLICEAI_INFERENCE_BACKEND STREQUAL "onnxruntime")
     add_test(NAME chunking_parity
         COMMAND ${BATS_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/chunking_parity.bats)
@@ -195,9 +262,11 @@ set_tests_properties(backend_parity PROPERTIES
     LABELS "parity"
     TIMEOUT 120)
 
+endif() # BATS_EXECUTABLE
+
 add_custom_target(check
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene)
+    DEPENDS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene ${CPLICEAI_UNIT_TEST_DEPS})
 
 # Shared library
 add_library(libcpliceai SHARED
@@ -209,11 +278,16 @@ add_library(libcpliceai SHARED
     src/gene_reference.c
     src/variant_input.c
     src/variant_output.c
+    src/haplotype.c
     src/logging/log.c)
 target_include_directories(libcpliceai PUBLIC src/)
 target_include_directories(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_INCLUDE_DIRS})
 set_target_properties(libcpliceai PROPERTIES VERSION 1 SOVERSION 1 OUTPUT_NAME "cpliceai")
 target_link_libraries(libcpliceai PRIVATE ${CPLICEAI_INFERENCE_LIBS} ${HTSLIB_LIBRARIES})
+
+# Install CLI binaries
+install(TARGETS cpliceai_reference cpliceai_predict_variant cpliceai_predict_gene
+        RUNTIME DESTINATION bin)
 
 # Install library
 install(TARGETS libcpliceai

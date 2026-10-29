@@ -1,0 +1,3 @@
+CHROM	POS	REF	ALT	GT
+chrTest	1000	G	A,T	1|2
+chrTest	1010	C	G	0|1
